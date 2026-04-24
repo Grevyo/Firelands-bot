@@ -1,0 +1,15 @@
+{
+  "name": "firelands-united-bot",
+  "version": "1.0.0",
+  "description": "Discord attendance bot with Google Calendar sync for Firelands United",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.16.3",
+    "googleapis": "^144.0.0",
+    "node-cron": "^3.0.3"
+  }
+}
