@@ -153,7 +153,8 @@ async function syncCalendarEvents() {
 
     const calendarEvents = await fetchUpcomingEvents({
       calendarId: config.bot.calendarId || 'hello@firelandsunited.com',
-      daysAhead: 14
+      daysAhead: 14,
+      credentialsPath: config.bot.calendarCredentialsPath || ''
     });
 
     const db = loadDb();

@@ -9,7 +9,8 @@ function defaultConfig() {
       tokenReference: process.env.DISCORD_TOKEN || '',
       clientId: process.env.DISCORD_CLIENT_ID || '',
       guildId: process.env.DISCORD_GUILD_ID || '',
-      calendarId: process.env.CALENDAR_ID || 'hello@firelandsunited.com'
+      calendarId: process.env.CALENDAR_ID || 'hello@firelandsunited.com',
+      calendarCredentialsPath: process.env.CALENDAR_CREDENTIALS_PATH || process.env.GOOGLE_APPLICATION_CREDENTIALS || 'credentials.json'
     },
     roles: {
       mens: {
