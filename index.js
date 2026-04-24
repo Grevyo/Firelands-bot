@@ -97,7 +97,8 @@ function formatEventDate(dateValue) {
 
 async function postEventMessage(event) {
   const config = getConfig();
-  const eventsChannelId = config.channels.events;
+  const teamChatChannelId = config.channels.teamChats?.[event.team];
+  const eventsChannelId = teamChatChannelId || config.channels.events;
 
   if (!eventsChannelId) {
     throw new Error('Events channel ID is not configured.');
@@ -126,7 +127,7 @@ async function postEventMessage(event) {
   const row = new ActionRowBuilder().addComponents(attendingButton, notAttendingButton);
 
   const message = await channel.send({
-    content: `<@&${teamRoleId}>\n📅 ${event.title}\n🕒 ${formatEventDate(event.date)}`,
+    content: `<@&${teamRoleId}>\n📅 ${event.title}\n🕒 ${formatEventDate(event.date)}\nPlease mark your availability now (events are posted up to 14 days in advance).`,
     components: [row]
   });
 

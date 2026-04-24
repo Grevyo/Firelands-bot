@@ -18,6 +18,10 @@
   "channels": {
     "events": "",
     "logs": "",
-    "ticket": ""
+    "ticket": "",
+    "teamChats": {
+      "mens": "",
+      "womens": ""
+    }
   }
 }

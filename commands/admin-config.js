@@ -9,7 +9,9 @@ const FIELD_MAP = {
   womens_coach_role_id: 'roles.womens.coach',
   events_channel_id: 'channels.events',
   logs_channel_id: 'channels.logs',
-  ticket_channel_id: 'channels.ticket'
+  ticket_channel_id: 'channels.ticket',
+  mens_team_channel_id: 'channels.teamChats.mens',
+  womens_team_channel_id: 'channels.teamChats.womens'
 };
 
 function isSnowflake(value) {
@@ -66,7 +68,9 @@ module.exports = {
               { name: 'Womens coach role ID', value: 'womens_coach_role_id' },
               { name: 'Events channel ID', value: 'events_channel_id' },
               { name: 'Logs channel ID', value: 'logs_channel_id' },
-              { name: 'Ticket channel/category ID', value: 'ticket_channel_id' }
+              { name: 'Ticket channel/category ID', value: 'ticket_channel_id' },
+              { name: 'Mens team chat channel ID', value: 'mens_team_channel_id' },
+              { name: 'Womens team chat channel ID', value: 'womens_team_channel_id' }
             )
         )
         .addStringOption((opt) =>
@@ -108,6 +112,8 @@ module.exports = {
         `Mens Coach Role: ${config.roles.mens.coach || 'not set'}`,
         `Womens Coach Role: ${config.roles.womens.coach || 'not set'}`,
         `Events Channel: ${config.channels.events || 'not set'}`,
+        `Mens Team Chat Channel: ${config.channels.teamChats?.mens || 'not set'}`,
+        `Womens Team Chat Channel: ${config.channels.teamChats?.womens || 'not set'}`,
         `Logs Channel: ${config.channels.logs || 'not set'}`,
         `Ticket Channel/Category: ${config.channels.ticket || 'not set'}`,
         '',
