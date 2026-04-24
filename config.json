@@ -1,0 +1,23 @@
+{
+  "bot": {
+    "tokenReference": "",
+    "clientId": "",
+    "guildId": "",
+    "calendarId": "hello@firelandsunited.com"
+  },
+  "roles": {
+    "mens": {
+      "player": "ROLE_ID",
+      "coach": "ROLE_ID"
+    },
+    "womens": {
+      "player": "ROLE_ID",
+      "coach": "ROLE_ID"
+    }
+  },
+  "channels": {
+    "events": "",
+    "logs": "",
+    "ticket": ""
+  }
+}
