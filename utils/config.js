@@ -24,7 +24,11 @@ function defaultConfig() {
     channels: {
       events: process.env.EVENTS_CHANNEL_ID || '',
       logs: process.env.LOGS_CHANNEL_ID || '',
-      ticket: process.env.TICKET_CHANNEL_ID || ''
+      ticket: process.env.TICKET_CHANNEL_ID || '',
+      teamChats: {
+        mens: process.env.MENS_TEAM_CHANNEL_ID || '',
+        womens: process.env.WOMENS_TEAM_CHANNEL_ID || ''
+      }
     }
   };
 }
@@ -44,7 +48,14 @@ function ensureConfig() {
       mens: { ...defaultConfig().roles.mens, ...(current.roles?.mens || {}) },
       womens: { ...defaultConfig().roles.womens, ...(current.roles?.womens || {}) }
     },
-    channels: { ...defaultConfig().channels, ...(current.channels || {}) }
+    channels: {
+      ...defaultConfig().channels,
+      ...(current.channels || {}),
+      teamChats: {
+        ...defaultConfig().channels.teamChats,
+        ...(current.channels?.teamChats || {})
+      }
+    }
   };
 
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(merged, null, 2));

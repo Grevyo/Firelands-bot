@@ -7,7 +7,7 @@ function ensureDb() {
   if (!fs.existsSync(DB_PATH)) {
     fs.writeFileSync(
       DB_PATH,
-      JSON.stringify({ events: {}, meta: { postEventCoachReminders: {} } }, null, 2)
+      JSON.stringify({ events: {}, futureAvailability: {}, meta: { postEventCoachReminders: {} } }, null, 2)
     );
   }
 }
@@ -20,13 +20,14 @@ function loadDb() {
     const parsed = JSON.parse(raw);
 
     if (!parsed.events) parsed.events = {};
+    if (!parsed.futureAvailability) parsed.futureAvailability = {};
     if (!parsed.meta) parsed.meta = {};
     if (!parsed.meta.postEventCoachReminders) parsed.meta.postEventCoachReminders = {};
 
     return parsed;
   } catch (error) {
     console.error('Failed to load database:', error);
-    return { events: {}, meta: { postEventCoachReminders: {} } };
+    return { events: {}, futureAvailability: {}, meta: { postEventCoachReminders: {} } };
   }
 }
 
@@ -76,11 +77,26 @@ function markPostEventReminder(eventId, marked = true) {
   saveDb(db);
 }
 
+function setFutureAvailability(userId, team, date, payload) {
+  const db = loadDb();
+  if (!db.futureAvailability[userId]) db.futureAvailability[userId] = {};
+  if (!db.futureAvailability[userId][team]) db.futureAvailability[userId][team] = {};
+
+  db.futureAvailability[userId][team][date] = {
+    ...(db.futureAvailability[userId][team][date] || {}),
+    ...payload
+  };
+
+  saveDb(db);
+  return db.futureAvailability[userId][team][date];
+}
+
 module.exports = {
   loadDb,
   saveDb,
   upsertEvent,
   setEventMessageId,
   setResponse,
-  markPostEventReminder
+  markPostEventReminder,
+  setFutureAvailability
 };
