@@ -67,6 +67,35 @@ function sanitizeChannelName(name) {
     .slice(0, 90);
 }
 
+function chunkLines(lines, size = 20) {
+  const chunks = [];
+  for (let i = 0; i < lines.length; i += size) chunks.push(lines.slice(i, i + size));
+  return chunks;
+}
+
+function summarizeAttendance(event, db, guild, teamRolesMap) {
+  if (!event.team || !teamRolesMap[event.team]?.player) return 'Attendance: n/a';
+
+  const roleId = teamRolesMap[event.team].player;
+  const role = guild.roles.cache.get(roleId);
+  const totalPlayers = role ? role.members.size : 0;
+  const responses = db.events[event.id]?.responses || {};
+  const values = Object.values(responses);
+
+  const yes = values.filter((response) => response.status === 'yes').length;
+  const no = values.filter((response) => response.status === 'pending_no' || response.status === 'confirmed_no').length;
+  const noResponse = Math.max(totalPlayers - yes - no, 0);
+
+  return `✅ ${yes} | 🔴 ${no} | ❓ ${noResponse}`;
+}
+
+function formatTeamLabel(event, config) {
+  if (!event.team) return '❔ Unknown Team';
+  const emoji = config.teams?.[event.team]?.emoji || '🔹';
+  const label = event.team === 'mens' ? 'Mens Team' : "Women's Team";
+  return `${emoji} ${label}`;
+}
+
 module.exports = {
   name: 'interactionCreate',
 
@@ -241,30 +270,41 @@ module.exports = {
 
         if (action === 'view_google_events') {
           try {
+            const db = loadDb();
             const events = await fetchCalendarEvents({
               calendarId: config.bot.calendarId,
-              daysAhead: 60,
+              daysAhead: null,
               credentialsPath: config.bot.calendarCredentialsPath || ''
             });
 
             const lines = events.length
-              ? events.slice(0, 20).map((event) => {
+              ? events.map((event) => {
                 const date = new Date(event.date).toLocaleString();
-                return `• ${date} — **${event.title}**${event.team ? ` (${event.team})` : ''}`;
+                const attendance = summarizeAttendance(event, db, interaction.guild, teamRolesMap);
+                const shortTitle = event.title.length > 70 ? `${event.title.slice(0, 67)}...` : event.title;
+                return `• ${date} — ${formatTeamLabel(event, config)} — **${shortTitle}** — ${attendance}`;
               })
-              : ['No upcoming events found in the next 60 days.'];
+              : ['No upcoming events found.'];
 
-            const embed = new EmbedBuilder()
-              .setTitle('Google Calendar — Upcoming Club Events')
-              .setDescription(lines.join('\n'))
+            const chunks = chunkLines(lines, 15);
+            const embeds = chunks.map((chunk, index) => new EmbedBuilder()
+              .setTitle(`Google Calendar — Club Fixtures (${events.length})`)
+              .setDescription(chunk.join('\n'))
               .setColor(0x2ecc71)
-              .setFooter({ text: events.length > 20 ? `Showing first 20 of ${events.length} events` : `Showing ${events.length} events` });
+              .setFooter({ text: `Page ${index + 1} of ${chunks.length}` }));
 
             await interaction.update({
-              content: 'Loaded Google Calendar events.',
-              embeds: [embed],
+              content: 'Loaded Google Calendar fixtures with attendance.',
+              embeds: [embeds[0]],
               components: [createAdminQuickActionRow()]
             });
+
+            for (let i = 1; i < embeds.length; i += 1) {
+              await interaction.followUp({
+                embeds: [embeds[i]],
+                ephemeral: true
+              });
+            }
           } catch (error) {
             await interaction.update({
               content: `Could not load calendar events: ${error.message}`,
