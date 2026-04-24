@@ -16,6 +16,12 @@ function getEventStartIso(event) {
 }
 
 async function fetchUpcomingEvents({ calendarId, daysAhead = 14, credentialsPath = '' }) {
+  const items = await fetchCalendarEvents({ calendarId, daysAhead, credentialsPath });
+
+  return items.filter((event) => !!event.team);
+}
+
+async function fetchCalendarEvents({ calendarId, daysAhead = 14, credentialsPath = '' }) {
   const resolvedCredentialsPath = resolveCredentialsPath(credentialsPath);
 
   const auth = new google.auth.GoogleAuth({
@@ -36,15 +42,13 @@ async function fetchUpcomingEvents({ calendarId, daysAhead = 14, credentialsPath
     orderBy: 'startTime'
   });
 
-  const items = response.data.items || [];
-
-  return items
+  return (response.data.items || [])
     .map((event) => {
       const startIso = getEventStartIso(event);
       const title = event.summary || 'Untitled Event';
       const team = detectTeamFromTitle(title);
 
-      if (!event.id || !startIso || !team) return null;
+      if (!event.id || !startIso) return null;
 
       return {
         id: event.id,
@@ -70,6 +74,7 @@ function resolveCredentialsPath(credentialsPath = '') {
 }
 
 module.exports = {
+  fetchCalendarEvents,
   fetchUpcomingEvents,
   resolveCredentialsPath,
   detectTeamFromTitle,
