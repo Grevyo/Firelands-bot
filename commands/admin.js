@@ -135,6 +135,14 @@ module.exports = {
         .setCustomId('admin_quick_action')
         .setPlaceholder('Pick an action')
         .addOptions([
+          { label: 'Set Google Calendar ID', value: 'set_calendar_id', description: 'Update the calendar used by sync' },
+          { label: 'Set Mens Player Role', value: 'set_mens_player_role', description: 'Assign Mens team player role' },
+          { label: 'Set Mens Coach Role', value: 'set_mens_coach_role', description: 'Assign Mens team coach role' },
+          { label: 'Set Womens Player Role', value: 'set_womens_player_role', description: 'Assign Womens team player role' },
+          { label: 'Set Womens Coach Role', value: 'set_womens_coach_role', description: 'Assign Womens team coach role' },
+          { label: 'Set Mens Team Chat', value: 'set_mens_team_channel', description: 'Assign Mens team chat channel' },
+          { label: 'Set Womens Team Chat', value: 'set_womens_team_channel', description: 'Assign Womens team chat channel' },
+          { label: 'View Google Calendar Events', value: 'view_google_events', description: 'Show upcoming events from Google Calendar' },
           { label: 'Club Report', value: 'club_report', description: 'View club attendance report' },
           { label: 'Config Help', value: 'config_help', description: 'Show config usage notes' }
         ])
