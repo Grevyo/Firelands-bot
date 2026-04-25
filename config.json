@@ -40,5 +40,12 @@
     "womens": {
       "emoji": "\ud83d\udd34"
     }
+  },
+  "googleSync": {
+    "enabled": true,
+    "spreadsheetId": "1R7tGhGshBTU8o7G_9gCK2zChP7-JuXO106VNbrsi5-Q",
+    "fixturesRange": "Fixtures!A2:F",
+    "attendanceRange": "Attendance!A2:F",
+    "configRange": "Config!A2:C"
   }
 }

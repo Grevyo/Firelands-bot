@@ -171,7 +171,9 @@ module.exports = {
         setResponse(parsed.eventId, interaction.user.id, {
           status: 'yes',
           reason: '',
-          confirmed: false
+          confirmed: false,
+          username: interaction.user.tag,
+          updatedAt: new Date().toISOString()
         });
 
         await interaction.reply({ content: '✅ You are marked as attending.', ephemeral: true });
@@ -223,7 +225,8 @@ module.exports = {
 
         setResponse(parsed.eventId, targetUserId, {
           status: 'confirmed_no',
-          confirmed: true
+          confirmed: true,
+          updatedAt: new Date().toISOString()
         });
 
         await interaction.reply({ content: `✅ Absence confirmed for <@${targetUserId}>.`, ephemeral: false });
@@ -544,7 +547,9 @@ module.exports = {
       setResponse(eventId, interaction.user.id, {
         status: 'pending_no',
         reason,
-        confirmed: false
+        confirmed: false,
+        username: interaction.user.tag,
+        updatedAt: new Date().toISOString()
       });
 
       const shortEventId = eventId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 12);
