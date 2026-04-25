@@ -22,6 +22,7 @@ const { fetchUpcomingEvents } = require('./utils/googleCalendar');
 const { loadDb, upsertEvent, setEventMessageId } = require('./utils/database');
 const { startReminderJobs } = require('./utils/reminders');
 const { ensureConfig, loadConfig } = require('./utils/config');
+const { syncAllToSheet } = require('./utils/googleSheetsSync');
 
 ensureConfig();
 
@@ -188,6 +189,11 @@ async function syncCalendarEvents() {
 
       await postEventMessage({ ...syncedEvent, id: event.id });
       console.log(`Posted new event: ${syncedEvent.title} (${event.id})`);
+    }
+
+    if (config.googleSync?.enabled) {
+      const latestDb = loadDb();
+      await syncAllToSheet(config, latestDb);
     }
   } catch (error) {
     console.error('Calendar sync failed:', error);

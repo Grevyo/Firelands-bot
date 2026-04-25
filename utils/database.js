@@ -42,6 +42,7 @@ function upsertEvent(eventId, payload) {
   db.events[eventId] = {
     ...(db.events[eventId] || {}),
     ...payload,
+    updatedAt: new Date().toISOString(),
     responses: (db.events[eventId] && db.events[eventId].responses) || payload.responses || {}
   };
 

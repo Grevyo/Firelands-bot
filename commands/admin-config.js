@@ -1,5 +1,7 @@
 const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
 const { loadConfig, updateConfig } = require('../utils/config');
+const { loadDb } = require('../utils/database');
+const { syncAllToSheet } = require('../utils/googleSheetsSync');
 
 const FIELD_MAP = {
   bot_token_reference: 'bot.tokenReference',
@@ -16,7 +18,9 @@ const FIELD_MAP = {
   mens_staff_room_id: 'channels.staffRooms.mens',
   womens_staff_room_id: 'channels.staffRooms.womens',
   mens_private_chat_category_id: 'channels.privateChatCategories.mens',
-  womens_private_chat_category_id: 'channels.privateChatCategories.womens'
+  womens_private_chat_category_id: 'channels.privateChatCategories.womens',
+  google_sync_enabled: 'googleSync.enabled',
+  google_spreadsheet_id: 'googleSync.spreadsheetId'
 };
 
 function isSnowflake(value) {
@@ -25,6 +29,8 @@ function isSnowflake(value) {
 
 function validateField(field, value) {
   if (field === 'bot_token_reference') return value.length >= 10;
+  if (field === 'google_sync_enabled') return ['true', 'false'].includes(String(value).toLowerCase());
+  if (field === 'google_spreadsheet_id') return String(value).trim().length > 10;
   return isSnowflake(value);
 }
 
@@ -80,7 +86,9 @@ module.exports = {
               { name: 'Mens staff room channel ID', value: 'mens_staff_room_id' },
               { name: 'Womens staff room channel ID', value: 'womens_staff_room_id' },
               { name: 'Mens private chat category ID', value: 'mens_private_chat_category_id' },
-              { name: 'Womens private chat category ID', value: 'womens_private_chat_category_id' }
+              { name: 'Womens private chat category ID', value: 'womens_private_chat_category_id' },
+              { name: 'Google sync enabled (true/false)', value: 'google_sync_enabled' },
+              { name: 'Google spreadsheet ID/URL', value: 'google_spreadsheet_id' }
             )
         )
         .addStringOption((opt) =>
@@ -99,6 +107,17 @@ module.exports = {
           opt
             .setName('channel')
             .setDescription('Select a channel/category (supports type-ahead by name)')
+            .setRequired(false)
+        )
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName('sync-google')
+        .setDescription('Force-sync fixtures, attendance, and config to Google Sheets')
+        .addStringOption((opt) =>
+          opt
+            .setName('spreadsheet')
+            .setDescription('Optional spreadsheet ID or full URL')
             .setRequired(false)
         )
     ),
@@ -133,11 +152,49 @@ module.exports = {
         `Ticket Channel/Category: ${config.channels.ticket || 'not set'}`,
         `Mens Label Emoji: ${config.teams?.mens?.emoji || 'not set'}`,
         `Womens Label Emoji: ${config.teams?.womens?.emoji || 'not set'}`,
+        `Google Sync Enabled: ${config.googleSync?.enabled ? 'true' : 'false'}`,
+        `Google Spreadsheet: ${config.googleSync?.spreadsheetId || 'not set'}`,
         '',
         '_Note: Bot token changes are stored for restart/reference and do not hot-swap runtime auth._'
       ].join('\n');
 
       await interaction.reply({ content: message, ephemeral: true });
+      return;
+    }
+
+    if (subcommand === 'sync-google') {
+      const spreadsheetInput = interaction.options.getString('spreadsheet');
+
+      if (spreadsheetInput?.trim()) {
+        updateConfig('googleSync.spreadsheetId', spreadsheetInput.trim());
+      }
+
+      updateConfig('googleSync.enabled', true);
+
+      const latestConfig = loadConfig();
+      const db = loadDb();
+
+      try {
+        const result = await syncAllToSheet(latestConfig, db);
+        if (!result.ok) {
+          await interaction.reply({
+            content: 'Could not sync because spreadsheet ID is not configured.',
+            ephemeral: true
+          });
+          return;
+        }
+
+        await interaction.reply({
+          content: `✅ Synced fixtures, attendance, and config to Google Sheets (\`${result.spreadsheetId}\`).`,
+          ephemeral: true
+        });
+      } catch (error) {
+        await interaction.reply({
+          content: `❌ Google sync failed: ${error.message}`,
+          ephemeral: true
+        });
+      }
+
       return;
     }
 
@@ -192,7 +249,10 @@ module.exports = {
     }
 
     const configPath = FIELD_MAP[field];
-    updateConfig(configPath, value);
+    const normalizedValue = field === 'google_sync_enabled'
+      ? String(value).toLowerCase() === 'true'
+      : value;
+    updateConfig(configPath, normalizedValue);
 
     await interaction.reply({
       content: `✅ Updated **${field}**. ${field === 'bot_token_reference' ? 'Restart bot to use new token.' : ''}`,
