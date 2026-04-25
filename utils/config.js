@@ -47,6 +47,13 @@ function defaultConfig() {
       womens: {
         emoji: process.env.WOMENS_TEAM_EMOJI || '🔴'
       }
+    },
+    googleSync: {
+      enabled: (process.env.GOOGLE_SYNC_ENABLED || 'false').toLowerCase() === 'true',
+      spreadsheetId: process.env.GOOGLE_SPREADSHEET_ID || '',
+      fixturesRange: process.env.GOOGLE_FIXTURES_RANGE || 'Fixtures!A2:F',
+      attendanceRange: process.env.GOOGLE_ATTENDANCE_RANGE || 'Attendance!A2:F',
+      configRange: process.env.GOOGLE_CONFIG_RANGE || 'Config!A2:C'
     }
   };
 }
@@ -85,6 +92,10 @@ function ensureConfig() {
     teams: {
       mens: { ...defaultConfig().teams.mens, ...(current.teams?.mens || {}) },
       womens: { ...defaultConfig().teams.womens, ...(current.teams?.womens || {}) }
+    },
+    googleSync: {
+      ...defaultConfig().googleSync,
+      ...(current.googleSync || {})
     }
   };
 
