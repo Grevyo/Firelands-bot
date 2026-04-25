@@ -225,6 +225,46 @@ function buildMonthGroupedEventLines(events, db, guild, teamRolesMap, config) {
   return lines;
 }
 
+function createEventScopePickerRow(config) {
+  const teamOptions = Object.keys(config.teams || {}).slice(0, 24).map((team) => {
+    const meta = getTeamMeta(config, team);
+    return {
+      label: `${meta.emoji} ${meta.label}`.slice(0, 100),
+      value: team,
+      description: `Show fixtures for ${meta.label}`.slice(0, 100)
+    };
+  });
+
+  return new ActionRowBuilder().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId('admin_view_events_scope')
+      .setPlaceholder('Choose fixture scope')
+      .addOptions([
+        { label: 'All Teams', value: 'all', description: 'Show fixtures for every team/event' },
+        ...teamOptions
+      ].slice(0, 25))
+  );
+}
+
+function renderProgressBar(percent = 0) {
+  const normalized = Math.max(0, Math.min(100, Number(percent) || 0));
+  const filled = Math.round(normalized / 10);
+  return `${'🟩'.repeat(filled)}${'⬜'.repeat(10 - filled)} ${normalized}%`;
+}
+
+function renderProgressMessage(percent = 0, label = 'Working...') {
+  const done = percent >= 100 ? '\n✅ Complete.' : '';
+  return `⏳ ${label}\n${renderProgressBar(percent)}${done}`;
+}
+
+async function setProgressReply(interaction, percent, label, options = {}) {
+  await interaction.editReply({
+    content: renderProgressMessage(percent, label),
+    embeds: options.embeds || [],
+    components: options.components || []
+  });
+}
+
 function parseCustomId(customId) {
   const [action, eventId, userId] = customId.split(':');
   return { action, eventId, userId };
@@ -672,44 +712,11 @@ module.exports = {
         }
 
         if (action === 'view_google_events') {
-          try {
-            await interaction.deferUpdate();
-            const db = loadDb();
-            const events = await fetchCalendarEvents({
-              calendarId: config.bot.calendarId,
-              daysAhead: null,
-              credentialsPath: config.bot.calendarCredentialsPath || '',
-              teamMatchers: buildTeamMatchers(config)
-            });
-
-            const lines = buildMonthGroupedEventLines(events, db, interaction.guild, teamRolesMap, config);
-
-            const chunks = chunkLines(lines, 15);
-            const embeds = chunks.map((chunk, index) => new EmbedBuilder()
-              .setTitle(`Google Calendar — Club Fixtures (${events.length})`)
-              .setDescription(chunk.join('\n'))
-              .setColor(0x2ecc71)
-              .setFooter({ text: `Page ${index + 1} of ${chunks.length}` }));
-
-            await interaction.editReply({
-              content: 'Loaded Google Calendar fixtures with attendance.',
-              embeds: [embeds[0]],
-              components: [createGoogleToolsRow(), createAdminBackButtonRow()]
-            });
-
-            for (let i = 1; i < embeds.length; i += 1) {
-              await interaction.followUp({
-                embeds: [embeds[i]],
-                flags: MessageFlags.Ephemeral
-              });
-            }
-          } catch (error) {
-            await interaction.editReply({
-              content: `Could not load calendar events: ${error.message}`,
-              embeds: [],
-              components: [createGoogleToolsRow(), createAdminBackButtonRow()]
-            });
-          }
+          await interaction.update({
+            content: 'Choose a team to view fixtures, or choose **All Teams**.',
+            embeds: [],
+            components: [createEventScopePickerRow(config), createAdminQuickActionRow(), createAdminBackButtonRow()]
+          });
           return;
         }
 
@@ -729,6 +736,74 @@ module.exports = {
           embeds: [],
           components: [createTeamConfigActionRow(latestConfig, team), createBackButtonRow('admin_back_team_management')]
         });
+        return;
+      }
+
+      if (interaction.customId === 'admin_view_events_scope') {
+        const scope = interaction.values[0];
+        const latestConfig = loadConfig();
+
+        try {
+          await interaction.deferUpdate();
+          await setProgressReply(interaction, 0, 'Loading fixtures from Google Calendar...');
+
+          const events = await fetchCalendarEvents({
+            calendarId: latestConfig.bot.calendarId,
+            daysAhead: null,
+            credentialsPath: latestConfig.bot.calendarCredentialsPath || '',
+            teamMatchers: buildTeamMatchers(latestConfig)
+          });
+
+          await setProgressReply(interaction, 45, 'Saving fixtures and syncing Sheets...');
+          const db = loadDb();
+          for (const event of events) {
+            const existing = db.events[event.id] || {};
+            db.events[event.id] = {
+              ...existing,
+              title: event.title,
+              date: event.date,
+              team: existing.team || event.team,
+              discordMessageId: existing.discordMessageId || '',
+              responses: existing.responses || {},
+              updatedAt: new Date().toISOString()
+            };
+          }
+          saveDb(db);
+          await triggerGoogleSync(context);
+
+          const scopedEvents = scope === 'all'
+            ? events
+            : events.filter((event) => event.team === scope);
+
+          await setProgressReply(interaction, 80, 'Formatting fixture view...');
+          const lines = buildMonthGroupedEventLines(scopedEvents, loadDb(), interaction.guild, teamRolesMap, latestConfig);
+          const scopeLabel = scope === 'all' ? 'All Teams' : getTeamMeta(latestConfig, scope).label;
+          const chunks = chunkLines(lines, 15);
+          const embeds = chunks.map((chunk, index) => new EmbedBuilder()
+            .setTitle(`Google Calendar — ${scopeLabel} Fixtures (${scopedEvents.length})`)
+            .setDescription(chunk.join('\n'))
+            .setColor(0x2ecc71)
+            .setFooter({ text: `Page ${index + 1} of ${chunks.length}` }));
+
+          await interaction.editReply({
+            content: `${renderProgressMessage(100, 'Fixtures loaded.')}\nReturning to admin panel.`,
+            embeds: [embeds[0]],
+            components: [createAdminQuickActionRow()]
+          });
+
+          for (let i = 1; i < embeds.length; i += 1) {
+            await interaction.followUp({
+              embeds: [embeds[i]],
+              flags: MessageFlags.Ephemeral
+            });
+          }
+        } catch (error) {
+          await interaction.editReply({
+            content: `Could not load calendar events: ${error.message}`,
+            embeds: [],
+            components: [createGoogleToolsRow(), createAdminBackButtonRow()]
+          });
+        }
         return;
       }
 
@@ -906,6 +981,7 @@ module.exports = {
         }
 
         if (selectedAction === 'auto_assign_fixtures') {
+          await interaction.deferUpdate();
           const db = loadDb();
           const teamMatchers = buildTeamMatchers(config);
           const assigned = [];
@@ -932,7 +1008,7 @@ module.exports = {
             .slice(0, 25);
 
           if (!preview.length) {
-            await interaction.update({
+            await interaction.editReply({
               content: 'No fixtures changed from phrase matching. Update event phrases if needed.',
               embeds: [],
               components: [createTeamConfigActionRow(loadConfig(), team), createBackButtonRow('admin_back_team_management')]
@@ -946,7 +1022,7 @@ module.exports = {
             new StringSelectMenuBuilder()
               .setCustomId(`admin_fixture_correction_dates:${team}`)
               .setPlaceholder('Select any wrong fixture dates (optional)')
-              .setMinValues(1)
+              .setMinValues(0)
               .setMaxValues(preview.length)
               .addOptions(preview.map((item) => ({
                 label: `${new Date(item.date).toLocaleDateString()} — ${item.title}`.slice(0, 100),
@@ -955,7 +1031,7 @@ module.exports = {
               })))
           );
 
-          await interaction.update({
+          await interaction.editReply({
             content: [
               `✅ Auto-assigned ${assigned.length} fixture(s) by event name phrase.`,
               'Review the list below. If any dates are wrong, select them next.'
@@ -977,13 +1053,14 @@ module.exports = {
       }
 
       if (interaction.customId.startsWith('admin_set_fixture_team:')) {
+        await interaction.deferUpdate();
         const team = interaction.customId.split(':')[1];
         const eventId = interaction.values[0];
         const db = loadDb();
         const target = db.events[eventId];
 
         if (!target) {
-          await interaction.update({
+          await interaction.editReply({
             content: 'Fixture was not found in synced events.',
             embeds: [],
             components: [createTeamConfigActionRow(config, team), createBackButtonRow('admin_back_team_management')]
@@ -995,7 +1072,7 @@ module.exports = {
         saveDb(db);
         await triggerGoogleSync(context);
 
-        await interaction.update({
+        await interaction.editReply({
           content: `✅ Assigned **${target.title}** to **${getTeamMeta(config, team).label}**.`,
           embeds: [],
           components: [createTeamConfigActionRow(config, team), createBackButtonRow('admin_back_team_management')]
@@ -1080,8 +1157,11 @@ module.exports = {
       await interaction.deferUpdate();
       const [, configPath, team] = interaction.customId.split(':');
       const roleId = interaction.values[0];
+      await setProgressReply(interaction, 0, 'Updating role setting...');
       updateConfig(configPath, roleId);
+      await setProgressReply(interaction, 40, 'Saving role ID...');
       await logAdminUiAction(interaction, 'admin-config', 'set', { field: configPath, value: roleId });
+      await setProgressReply(interaction, 70, 'Syncing configuration...');
 
       try {
         await syncConfigSnapshotIfEnabled();
@@ -1095,7 +1175,7 @@ module.exports = {
       }
 
       await interaction.editReply({
-        content: `✅ Updated **${configPath}** to <@&${roleId}>.`,
+        content: `${renderProgressMessage(100, `Updated **${configPath}** to <@&${roleId}>.`)}`,
         embeds: [],
         components: [createTeamConfigActionRow(loadConfig(), team), createBackButtonRow('admin_back_team_management')]
       });
@@ -1110,8 +1190,11 @@ module.exports = {
       await interaction.deferUpdate();
       const [, configPath, team] = interaction.customId.split(':');
       const channelId = interaction.values[0];
+      await setProgressReply(interaction, 0, 'Updating channel setting...');
       updateConfig(configPath, channelId);
+      await setProgressReply(interaction, 40, 'Saving channel ID...');
       await logAdminUiAction(interaction, 'admin-config', 'set', { field: configPath, value: channelId });
+      await setProgressReply(interaction, 70, 'Syncing configuration...');
 
       try {
         await syncConfigSnapshotIfEnabled();
@@ -1125,7 +1208,7 @@ module.exports = {
       }
 
       await interaction.editReply({
-        content: `✅ Updated **${configPath}** to <#${channelId}>.`,
+        content: `${renderProgressMessage(100, `Updated **${configPath}** to <#${channelId}>.`)}`,
         embeds: [],
         components: [team === 'global' ? createGoogleToolsRow() : createTeamConfigActionRow(loadConfig(), team), createBackButtonRow(team === 'global' ? 'admin_back_google_tools' : 'admin_back_team_management')]
       });
@@ -1241,15 +1324,19 @@ module.exports = {
         return;
       }
 
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+      await interaction.editReply({ content: renderProgressMessage(0, 'Updating calendar setting...') });
       updateConfig('bot.calendarId', calendarId);
+      await interaction.editReply({ content: renderProgressMessage(40, 'Saving calendar ID...') });
       await logAdminUiAction(interaction, 'admin', 'set-calendar-id', { calendarId });
+      await interaction.editReply({ content: renderProgressMessage(70, 'Syncing configuration...') });
       try {
         await syncConfigSnapshotIfEnabled();
       } catch (error) {
-        await interaction.reply({ content: `✅ Updated **bot.calendarId** to \`${calendarId}\`. ⚠️ Sync warning: ${error.message}`, flags: MessageFlags.Ephemeral });
+        await interaction.editReply({ content: `✅ Updated **bot.calendarId** to \`${calendarId}\`. ⚠️ Sync warning: ${error.message}` });
         return;
       }
-      await interaction.reply({ content: `✅ Updated **bot.calendarId** to \`${calendarId}\`.`, flags: MessageFlags.Ephemeral });
+      await interaction.editReply({ content: renderProgressMessage(100, `Updated **bot.calendarId** to \`${calendarId}\`.`) });
       return;
     }
 
@@ -1266,15 +1353,19 @@ module.exports = {
         return;
       }
 
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+      await interaction.editReply({ content: renderProgressMessage(0, 'Updating team emoji...') });
       await logAdminUiAction(interaction, 'admin', 'set-emoji', { team, emoji });
       updateConfig(`teams.${team}.emoji`, emoji.trim());
+      await interaction.editReply({ content: renderProgressMessage(40, 'Saving emoji setting...') });
       try {
+        await interaction.editReply({ content: renderProgressMessage(70, 'Syncing configuration...') });
         await syncConfigSnapshotIfEnabled();
       } catch (error) {
-        await interaction.reply({ content: `✅ Team label updated. ⚠️ Sync warning: ${error.message}`, flags: MessageFlags.Ephemeral });
+        await interaction.editReply({ content: `✅ Team label updated. ⚠️ Sync warning: ${error.message}` });
         return;
       }
-      await adminCommand.handleSetEmoji(interaction, team, emoji);
+      await interaction.editReply({ content: renderProgressMessage(100, `Team emoji updated for **${getTeamMeta(loadConfig(), team).label}**.`) });
       return;
     }
 
@@ -1291,20 +1382,23 @@ module.exports = {
         return;
       }
 
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+      await interaction.editReply({ content: renderProgressMessage(0, 'Updating team name...') });
       updateConfig(`teams.${team}.label`, teamName);
+      await interaction.editReply({ content: renderProgressMessage(40, 'Saving team label...') });
       await logAdminUiAction(interaction, 'admin', 'set-team-name', { team, teamName });
 
       try {
+        await interaction.editReply({ content: renderProgressMessage(70, 'Syncing configuration...') });
         await syncConfigSnapshotIfEnabled();
       } catch (error) {
-        await interaction.reply({ content: `✅ Team name updated. ⚠️ Sync warning: ${error.message}`, flags: MessageFlags.Ephemeral });
+        await interaction.editReply({ content: `✅ Team name updated. ⚠️ Sync warning: ${error.message}` });
         return;
       }
 
       const latestConfig = loadConfig();
-      await interaction.reply({
-        content: `✅ Team name updated to **${teamName}**.\n\n${getTeamConfigSummary(latestConfig, interaction.guild, team)}`,
-        flags: MessageFlags.Ephemeral
+      await interaction.editReply({
+        content: `${renderProgressMessage(100, `Team name updated to **${teamName}**.`)}\n\n${getTeamConfigSummary(latestConfig, interaction.guild, team)}`
       });
       return;
     }
@@ -1323,20 +1417,23 @@ module.exports = {
         return;
       }
 
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+      await interaction.editReply({ content: renderProgressMessage(0, 'Updating event name phrases...') });
       updateConfig(`teams.${team}.eventNamePhrases`, phrases);
+      await interaction.editReply({ content: renderProgressMessage(40, 'Saving phrase matching...') });
       await logAdminUiAction(interaction, 'admin', 'set-event-phrases', { team, phrases });
 
       try {
+        await interaction.editReply({ content: renderProgressMessage(70, 'Syncing configuration...') });
         await syncConfigSnapshotIfEnabled();
       } catch (error) {
-        await interaction.reply({ content: `✅ Event phrases updated. ⚠️ Sync warning: ${error.message}`, flags: MessageFlags.Ephemeral });
+        await interaction.editReply({ content: `✅ Event phrases updated. ⚠️ Sync warning: ${error.message}` });
         return;
       }
 
       const latestConfig = loadConfig();
-      await interaction.reply({
-        content: `✅ Event phrases updated for **${getTeamMeta(latestConfig, team).label}**: ${phrases.join(', ')}.`,
-        flags: MessageFlags.Ephemeral
+      await interaction.editReply({
+        content: `${renderProgressMessage(100, `Event phrases updated for **${getTeamMeta(latestConfig, team).label}**.`)}\n${phrases.join(', ')}`
       });
       return;
     }
@@ -1362,26 +1459,28 @@ module.exports = {
         return;
       }
 
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+      await interaction.editReply({ content: renderProgressMessage(0, 'Creating new team...') });
       updateConfig(`teams.${teamKey}`, { emoji: teamEmoji, label: teamLabel, eventNamePhrases: [] });
       updateConfig(`roles.${teamKey}`, { player: 'ROLE_ID', coach: 'ROLE_ID' });
       updateConfig(`channels.teamChats.${teamKey}`, '');
       updateConfig(`channels.staffRooms.${teamKey}`, '');
       updateConfig(`channels.privateChatCategories.${teamKey}`, '');
+      await interaction.editReply({ content: renderProgressMessage(40, 'Saving team configuration...') });
       await logAdminUiAction(interaction, 'admin', 'new-team', { teamKey, teamLabel });
 
       try {
+        await interaction.editReply({ content: renderProgressMessage(70, 'Syncing configuration...') });
         await syncConfigSnapshotIfEnabled();
       } catch (error) {
-        await interaction.reply({
-          content: `✅ Team created: **${teamLabel}** (\`${teamKey}\`). Configure roles/chats from Admin panel. ⚠️ Sync warning: ${error.message}`,
-          flags: MessageFlags.Ephemeral
+        await interaction.editReply({
+          content: `✅ Team created: **${teamLabel}** (\`${teamKey}\`). Configure roles/chats from Admin panel. ⚠️ Sync warning: ${error.message}`
         });
         return;
       }
 
-      await interaction.reply({
-        content: `✅ Team created: **${teamLabel}** (\`${teamKey}\`). It now appears under "Configure Existing Team".`,
-        flags: MessageFlags.Ephemeral
+      await interaction.editReply({
+        content: renderProgressMessage(100, `Team created: **${teamLabel}** (\`${teamKey}\`). It now appears under "Configure Existing Team".`)
       });
     }
   }
