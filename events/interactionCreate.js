@@ -164,20 +164,41 @@ function createTeamConfigActionRow(config, team) {
   );
 }
 
-function createTeamConfigIdSettingsRows(team) {
+function isConfiguredId(value) {
+  return Boolean(value && value !== 'ROLE_ID');
+}
+
+function createTeamConfigIdSettingsRows(team, config = loadConfig()) {
+  const playerRoleSet = isConfiguredId(config.roles?.[team]?.player);
+  const coachRoleSet = isConfiguredId(config.roles?.[team]?.coach);
+  const captainRoleSet = isConfiguredId(config.teams?.[team]?.captainRoleId);
+  const teamChatSet = isConfiguredId(config.channels?.teamChats?.[team]);
+  const staffRoomSet = isConfiguredId(config.channels?.staffRooms?.[team]);
+  const privateCategorySet = isConfiguredId(config.channels?.privateChatCategories?.[team]);
+
   return [
     new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId(`admin_team_config_action:${team}:player_role`).setLabel('👕 Player Role ID').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId(`admin_team_config_action:${team}:coach_role`).setLabel('🧢 Coach Role ID').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId(`admin_team_config_action:${team}:captain_role`).setLabel('🫡 Captain Role ID').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId(`admin_team_config_action:${team}:team_chat`).setLabel('💬 Team Chat ID').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId(`admin_team_config_action:${team}:staff_room`).setLabel('🧰 Staff Room ID').setStyle(ButtonStyle.Secondary)
+      new ButtonBuilder().setCustomId(`admin_team_config_action:${team}:player_role`).setLabel('👕 Player Role ID').setStyle(playerRoleSet ? ButtonStyle.Success : ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId(`admin_team_config_action:${team}:coach_role`).setLabel('🧢 Coach Role ID').setStyle(coachRoleSet ? ButtonStyle.Success : ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId(`admin_team_config_action:${team}:captain_role`).setLabel('🫡 Captain Role ID').setStyle(captainRoleSet ? ButtonStyle.Success : ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId(`admin_team_config_action:${team}:team_chat`).setLabel('💬 Team Chat ID').setStyle(teamChatSet ? ButtonStyle.Success : ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId(`admin_team_config_action:${team}:staff_room`).setLabel('🧰 Staff Room ID').setStyle(staffRoomSet ? ButtonStyle.Success : ButtonStyle.Danger)
     ),
     new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId(`admin_team_config_action:${team}:private_category`).setLabel('🚫 Absence Category ID').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`admin_team_config_action:${team}:private_category`).setLabel('🚫 Absence Category ID').setStyle(privateCategorySet ? ButtonStyle.Success : ButtonStyle.Danger),
       new ButtonBuilder().setCustomId(`admin_team_config_action:${team}:team_gender`).setLabel('⚧️ Team Gender').setStyle(ButtonStyle.Secondary)
     )
   ];
+}
+
+async function refreshFixtureSettingsMessage(interaction, team) {
+  if (!interaction.message?.edit) return;
+  const latestConfig = loadConfig();
+  await interaction.message.edit({
+    content: `${getTeamConfigSummary(latestConfig, interaction.guild, team)}\n\n**Fixture settings**`,
+    embeds: [],
+    components: [createTeamConfigFixtureSettingsRow(team), createBackButtonRow(`admin_back_team_config:${team}`)]
+  }).catch(() => null);
 }
 
 function createTeamConfigFixtureSettingsRow(team) {
@@ -1649,7 +1670,7 @@ module.exports = {
           await interaction.update({
             content: `${getTeamConfigSummary(latestConfig, interaction.guild, team)}\n\n**ID settings**`,
             embeds: [],
-            components: [...createTeamConfigIdSettingsRows(team), createBackButtonRow(`admin_back_team_config:${team}`)]
+            components: [...createTeamConfigIdSettingsRows(team, latestConfig), createBackButtonRow(`admin_back_team_config:${team}`)]
           });
           return;
         }
@@ -2613,7 +2634,33 @@ module.exports = {
           });
           return;
         }
-        await saveSheetBackupSlot(config, { slot, name: pending.name, createdBy: `${interaction.user.tag}`, summary: pending.summary, snapshot: JSON.stringify(built.snapshot) });
+        await interaction.editReply({
+          content: progressLines({
+            title: `💾 Saving backup **${pending.name}** to slot ${slot}`,
+            percent: 95,
+            etaMs: 0,
+            currentTab: 'Writing backup row',
+            tabs: progressState.tabs
+          }),
+          embeds: [],
+          components: [createBackButtonRow('admin_back_club_management')]
+        });
+        try {
+          await Promise.race([
+            saveSheetBackupSlot(config, { slot, name: pending.name, createdBy: `${interaction.user.tag}`, summary: pending.summary, snapshot: JSON.stringify(built.snapshot) }),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Backup write timed out after 90 seconds. Please try again.')), 90_000))
+          ]);
+        } catch (error) {
+          await interaction.editReply({
+            content: [
+              `❌ Could not save backup **${pending.name}** to slot ${slot}.`,
+              `Reason: ${error.message}`
+            ].join('\n'),
+            embeds: [],
+            components: [createBackButtonRow('admin_back_club_management')]
+          });
+          return;
+        }
         await interaction.editReply({
           content: progressLines({
             title: `✅ Saved backup **${pending.name}** to slot ${slot}`,
@@ -3899,13 +3946,35 @@ module.exports = {
           return;
         }
 
-        await saveSheetBackupSlot(configForBackup, {
-          slot: freeSlot,
-          name,
-          createdBy: `${interaction.user.tag}`,
-          summary,
-          snapshot: JSON.stringify(built.snapshot)
+        await interaction.editReply({
+          content: progressLines({
+            title: `💾 Saving backup **${name}** to slot ${freeSlot}`,
+            percent: 95,
+            etaMs: 0,
+            currentTab: 'Writing backup row',
+            tabs: progressState.tabs
+          })
         });
+        try {
+          await Promise.race([
+            saveSheetBackupSlot(configForBackup, {
+              slot: freeSlot,
+              name,
+              createdBy: `${interaction.user.tag}`,
+              summary,
+              snapshot: JSON.stringify(built.snapshot)
+            }),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Backup write timed out after 90 seconds. Please try again.')), 90_000))
+          ]);
+        } catch (error) {
+          await interaction.editReply({
+            content: [
+              `❌ Could not save backup **${name}**.`,
+              `Reason: ${error.message}`
+            ].join('\n')
+          });
+          return;
+        }
         await interaction.editReply({
           content: progressLines({
             title: `✅ Saved backup **${name}** in slot ${freeSlot}`,
@@ -3999,6 +4068,7 @@ module.exports = {
       }
 
       const latestConfig = loadConfig();
+      await refreshFixtureSettingsMessage(interaction, team);
       await interaction.editReply({
         content: `${renderProgressMessage(100, `Event phrases updated for **${getTeamMeta(latestConfig, team).label}**.`)}\n${phrases.join(', ')}`
       });
