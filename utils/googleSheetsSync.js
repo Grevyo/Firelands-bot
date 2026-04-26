@@ -13,6 +13,12 @@ function truncateId(id = '') {
   return `${value.slice(0, 6)}…${value.slice(-4)}`;
 }
 
+function compactText(value = '', max = 80) {
+  const normalized = String(value || '').replace(/\s+/g, ' ').trim();
+  if (normalized.length <= max) return normalized;
+  return `${normalized.slice(0, max - 1)}…`;
+}
+
 function resolveCredentialsPath(config = {}) {
   const configuredPath = config.bot?.calendarCredentialsPath
     || process.env.CALENDAR_CREDENTIALS_PATH
@@ -45,6 +51,11 @@ function getSpreadsheetId(config = {}) {
 
 function getSheetNameFromRange(range = '') {
   return String(range).split('!')[0].trim();
+}
+
+function getRangeStartRow(range = '') {
+  const match = String(range).match(/![A-Z]+(\d+)/i);
+  return match ? Number.parseInt(match[1], 10) : 2;
 }
 
 function toColumnLabel(index) {
@@ -193,9 +204,9 @@ function buildFixtureRows(db = {}) {
     .sort((a, b) => new Date(a.date || 0).getTime() - new Date(b.date || 0).getTime())
     .map((event) => [
       event.eventId,
-      event.title,
+      compactText(event.title, 70),
       event.date,
-      event.location,
+      compactText(event.location, 60),
       event.team,
       event.discordMessageId,
       event.updatedAt
@@ -297,14 +308,14 @@ function buildPlayerRows(db = {}, config = {}) {
   return Object.entries(players)
     .map(([userId, profile]) => ([
       truncateId(userId),
-      profile.customName || '',
+      compactText(profile.customName || '', 40),
       profile.shirtNumber || '',
       Array.isArray(profile.teams) ? profile.teams.join(',') : '',
       Array.isArray(profile.roles)
         ? profile.roles.map((roleId) => roleNameMap.get(String(roleId)) || `Unknown (${truncateId(roleId)})`).join(', ')
         : '',
       profile.joinedDiscordAt || '',
-      profile.notes || '',
+      compactText(profile.notes || '', 80),
       profile.facePngUrl || '',
       profile.updatedAt || toIso(),
       userId
@@ -325,7 +336,7 @@ function buildAbsenceRows(db = {}) {
       truncateId(ticket.eventId || ''),
       event.title || '',
       event.date || '',
-      event.location || '',
+      compactText(event.location || '', 60),
       ticket.team || event.team || '',
       truncateId(ticket.playerId || ''),
       ticket.playerName || response.username || '',
@@ -487,9 +498,10 @@ async function ensureSheetLayout(sheets, spreadsheetId, sections = []) {
   const headerUpdates = sections.map((section) => {
     const title = getSheetNameFromRange(section.range);
     const headers = section.headers || [];
+    const startRow = Math.max(1, getRangeStartRow(section.range) - 1);
     const endColumn = toColumnLabel(headers.length);
     return {
-      range: `${title}!A1:${endColumn}1`,
+      range: `${title}!A${startRow}:${endColumn}${startRow}`,
       majorDimension: 'ROWS',
       values: [headers]
     };
@@ -503,25 +515,46 @@ async function ensureSheetLayout(sheets, spreadsheetId, sections = []) {
     }
   });
 
+  const tabColors = {
+    Home: { red: 0.2, green: 0.55, blue: 0.95 },
+    Fixtures: { red: 0.22, green: 0.62, blue: 0.3 },
+    'Mens Fixtures': { red: 0.18, green: 0.4, blue: 0.85 },
+    'Womens Fixtures': { red: 0.82, green: 0.28, blue: 0.36 },
+    Attendance: { red: 0.56, green: 0.37, blue: 0.78 },
+    Config: { red: 0.46, green: 0.46, blue: 0.46 },
+    'Config IDs': { red: 0.3, green: 0.3, blue: 0.3 },
+    'Config Backups': { red: 0.85, green: 0.56, blue: 0.2 },
+    Players: { red: 0.17, green: 0.67, blue: 0.67 },
+    Absences: { red: 0.9, green: 0.45, blue: 0.2 },
+    'Player and Coach Notes': { red: 0.52, green: 0.42, blue: 0.73 },
+    Backups: { red: 0.95, green: 0.71, blue: 0.12 }
+  };
+
   const formatRequests = sections
     .map((section) => {
       const title = getSheetNameFromRange(section.range);
       const sheetId = existingSheets.get(title);
       if (!Number.isInteger(sheetId)) return null;
       const headerCount = (section.headers || []).length;
+      const startRow = Math.max(1, getRangeStartRow(section.range) - 1);
+      const tabColor = tabColors[title];
       return [
         {
           updateSheetProperties: {
-            properties: { sheetId, gridProperties: { frozenRowCount: 1 } },
-            fields: 'gridProperties.frozenRowCount'
+            properties: {
+              sheetId,
+              gridProperties: { frozenRowCount: startRow },
+              ...(tabColor ? { tabColorStyle: { rgbColor: tabColor } } : {})
+            },
+            fields: `gridProperties.frozenRowCount${tabColor ? ',tabColorStyle' : ''}`
           }
         },
         {
           repeatCell: {
             range: {
               sheetId,
-              startRowIndex: 0,
-              endRowIndex: 1,
+              startRowIndex: startRow - 1,
+              endRowIndex: startRow,
               startColumnIndex: 0,
               endColumnIndex: headerCount
             },
@@ -532,6 +565,16 @@ async function ensureSheetLayout(sheets, spreadsheetId, sections = []) {
               }
             },
             fields: 'userEnteredFormat(textFormat,backgroundColor)'
+          }
+        },
+        {
+          autoResizeDimensions: {
+            dimensions: {
+              sheetId,
+              dimension: 'COLUMNS',
+              startIndex: 0,
+              endIndex: Math.max(headerCount, 1)
+            }
           }
         }
       ];
@@ -547,6 +590,43 @@ async function ensureSheetLayout(sheets, spreadsheetId, sections = []) {
   }
 
   return existingSheets;
+}
+
+async function writeTabNavigationRows(sheets, spreadsheetId, sections = [], sheetIdByTitle = new Map()) {
+  if (!sections.length) return;
+
+  const data = sections.map((section, index) => {
+    const title = getSheetNameFromRange(section.range);
+    const previous = sections[index - 1];
+    const next = sections[index + 1];
+    const homeGid = sheetIdByTitle.get('Home');
+    const prevTitle = previous ? getSheetNameFromRange(previous.range) : '';
+    const nextTitle = next ? getSheetNameFromRange(next.range) : '';
+    const prevGid = prevTitle ? sheetIdByTitle.get(prevTitle) : null;
+    const nextGid = nextTitle ? sheetIdByTitle.get(nextTitle) : null;
+    const headerCount = Math.max((section.headers || []).length, 1);
+    const startCol = toColumnLabel(headerCount + 1);
+    const endCol = toColumnLabel(headerCount + 4);
+
+    return {
+      range: `${title}!${startCol}1:${endCol}1`,
+      majorDimension: 'ROWS',
+      values: [[
+        homeGid ? `=HYPERLINK("#gid=${homeGid}", "🏠 Home")` : 'Home',
+        prevGid ? `=HYPERLINK("#gid=${prevGid}", "⬅ Previous")` : '',
+        nextGid ? `=HYPERLINK("#gid=${nextGid}", "Next ➜")` : '',
+        section.description || ''
+      ]]
+    };
+  });
+
+  await sheets.spreadsheets.values.batchUpdate({
+    spreadsheetId,
+    requestBody: {
+      valueInputOption: 'USER_ENTERED',
+      data
+    }
+  });
 }
 
 function buildHomeRows(sections = [], sheetIdByTitle = new Map()) {
@@ -570,6 +650,82 @@ function buildHomeRows(sections = [], sheetIdByTitle = new Map()) {
       nextLink
     ];
   });
+}
+
+function buildSheetsBackupSnapshot(config = {}, db = {}) {
+  const snapshot = {
+    createdAt: toIso(),
+    config: JSON.parse(JSON.stringify(config || {})),
+    db: JSON.parse(JSON.stringify(db || {}))
+  };
+  delete snapshot.config._configBackups;
+  return snapshot;
+}
+
+async function loadSheetBackups(config = {}) {
+  const spreadsheetId = getSpreadsheetId(config);
+  if (!spreadsheetId) return [];
+  const sheets = await getSheetsClient(config);
+  const backupsRange = config.googleSync?.sheetBackupsRange || 'Backups!A2:F';
+
+  await ensureSheetLayout(sheets, spreadsheetId, [
+    { range: backupsRange, headers: ['slot', 'name', 'createdAt', 'createdBy', 'summary', 'snapshot'] }
+  ]);
+
+  const response = await sheets.spreadsheets.values.get({ spreadsheetId, range: backupsRange }).catch(() => ({ data: { values: [] } }));
+  const rows = response.data.values || [];
+  return rows
+    .map((row) => ({
+      slot: Number.parseInt(row[0] || '0', 10),
+      name: row[1] || '',
+      createdAt: row[2] || '',
+      createdBy: row[3] || '',
+      summary: row[4] || '',
+      snapshot: row[5] || ''
+    }))
+    .filter((entry) => Number.isInteger(entry.slot) && entry.slot >= 1 && entry.slot <= 5);
+}
+
+async function saveSheetBackupSlot(config = {}, { slot = 1, name = '', createdBy = '', summary = '', snapshot = '' } = {}) {
+  const spreadsheetId = getSpreadsheetId(config);
+  if (!spreadsheetId) return { ok: false, reason: 'missing_spreadsheet_id' };
+  const sheets = await getSheetsClient(config);
+  const backupsRange = config.googleSync?.sheetBackupsRange || 'Backups!A2:F';
+  const title = getSheetNameFromRange(backupsRange);
+  const row = Number(slot);
+  if (!Number.isInteger(row) || row < 1 || row > 5) return { ok: false, reason: 'invalid_slot' };
+
+  await ensureSheetLayout(sheets, spreadsheetId, [
+    { range: backupsRange, headers: ['slot', 'name', 'createdAt', 'createdBy', 'summary', 'snapshot'] }
+  ]);
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId,
+    range: `${title}!A${row + 1}:F${row + 1}`,
+    valueInputOption: 'RAW',
+    requestBody: {
+      values: [[row, name, toIso(), createdBy, summary, snapshot]]
+    }
+  });
+
+  const metadata = await sheets.spreadsheets.get({ spreadsheetId });
+  const backupSheetId = (metadata.data.sheets || []).find((sheet) => sheet.properties?.title === title)?.properties?.sheetId;
+  if (Number.isInteger(backupSheetId)) {
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: {
+        requests: [{
+          updateDimensionProperties: {
+            range: { sheetId: backupSheetId, dimension: 'COLUMNS', startIndex: 5, endIndex: 6 },
+            properties: { hiddenByUser: true },
+            fields: 'hiddenByUser'
+          }
+        }]
+      }
+    });
+  }
+
+  return { ok: true };
 }
 
 async function syncAllToSheet(config = {}, db = {}, options = {}) {
@@ -605,6 +761,7 @@ async function syncAllToSheet(config = {}, db = {}, options = {}) {
   ];
 
   const sheetIdByTitle = await ensureSheetLayout(sheets, spreadsheetId, sections);
+  await writeTabNavigationRows(sheets, spreadsheetId, sections, sheetIdByTitle);
 
   await writeRange(sheets, spreadsheetId, fixturesRange, buildFixtureRows(db), options);
   await writeRange(sheets, spreadsheetId, mensFixturesRange, buildFixtureRowsForTeam(db, 'mens'), options);
@@ -685,15 +842,20 @@ async function syncConfigOnlyToSheet(config = {}) {
   const configIdsRange = config.googleSync?.configIdsRange || 'Config IDs!A2:C';
   const configBackupsRange = config.googleSync?.configBackupsRange || 'Config Backups!A2:F';
 
-  await ensureSheetLayout(sheets, spreadsheetId, [
-    { range: configRange, headers: ['key', 'value', 'updatedAt'] },
-    { range: configIdsRange, headers: ['key', 'value', 'updatedAt'] },
-    { range: configBackupsRange, headers: ['backupOrder', 'timestamp', 'changedPath', 'reason', 'snapshotPreview', 'snapshot'] }
-  ]);
+  const sections = [
+    { range: 'Home!A2:E', headers: ['Tab', 'Purpose', 'Open', 'Previous', 'Next'], description: 'Navigation hub for every tab.' },
+    { range: configRange, headers: ['key', 'value', 'updatedAt'], description: 'Flattened runtime configuration.' },
+    { range: configIdsRange, headers: ['key', 'value', 'updatedAt'], description: 'Role / channel / team identifiers.' },
+    { range: configBackupsRange, headers: ['backupOrder', 'timestamp', 'changedPath', 'reason', 'snapshotPreview', 'snapshot'], description: 'Last 5 config states before changes.' }
+  ];
+
+  const sheetIdByTitle = await ensureSheetLayout(sheets, spreadsheetId, sections);
+  await writeTabNavigationRows(sheets, spreadsheetId, sections, sheetIdByTitle);
 
   await writeRange(sheets, spreadsheetId, configRange, await buildMergedConfigRows(sheets, spreadsheetId, config, configRange));
   await writeRange(sheets, spreadsheetId, configIdsRange, await buildMergedConfigIdRows(sheets, spreadsheetId, config, configIdsRange));
   await writeRange(sheets, spreadsheetId, configBackupsRange, buildConfigBackupRows(config));
+  await writeRange(sheets, spreadsheetId, 'Home!A2:E', buildHomeRows(sections.slice(1), sheetIdByTitle));
 
   return { ok: true, spreadsheetId };
 }
@@ -715,6 +877,9 @@ module.exports = {
   buildConfigIdRows,
   buildMergedConfigRows,
   ensureSheetLayout,
+  buildSheetsBackupSnapshot,
+  loadSheetBackups,
+  saveSheetBackupSlot,
   syncAllToSheet,
   syncConfigOnlyToSheet
 };
