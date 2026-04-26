@@ -7,7 +7,7 @@ function ensureDb() {
   if (!fs.existsSync(DB_PATH)) {
     fs.writeFileSync(
       DB_PATH,
-      JSON.stringify({ events: {}, futureAvailability: {}, absenceTickets: {}, players: {}, meta: { postEventCoachReminders: {} } }, null, 2)
+      JSON.stringify({ events: {}, futureAvailability: {}, absenceTickets: {}, players: {}, meta: { postEventCoachReminders: {}, setupWizard: {} } }, null, 2)
     );
   }
 }
@@ -25,11 +25,12 @@ function loadDb() {
     if (!parsed.players) parsed.players = {};
     if (!parsed.meta) parsed.meta = {};
     if (!parsed.meta.postEventCoachReminders) parsed.meta.postEventCoachReminders = {};
+    if (!parsed.meta.setupWizard) parsed.meta.setupWizard = {};
 
     return parsed;
   } catch (error) {
     console.error('Failed to load database:', error);
-    return { events: {}, futureAvailability: {}, absenceTickets: {}, players: {}, meta: { postEventCoachReminders: {} } };
+    return { events: {}, futureAvailability: {}, absenceTickets: {}, players: {}, meta: { postEventCoachReminders: {}, setupWizard: {} } };
   }
 }
 
