@@ -148,17 +148,24 @@ function createSetupFinishRow() {
 }
 
 function createSetupBackupRows(backups = []) {
+  const bySlot = new Map(backups.map((entry) => [entry.slot, entry]));
+  const slotOptions = Array.from({ length: 5 }, (_, idx) => {
+    const slot = idx + 1;
+    const entry = bySlot.get(slot);
+    return {
+      label: `Slot ${slot} • ${entry?.name || (entry ? `Backup ${slot}` : 'Empty slot')}`.slice(0, 100),
+      value: String(slot),
+      description: (entry?.createdAt || 'No backup saved').slice(0, 100)
+    };
+  });
+
   const backupPickerRow = new ActionRowBuilder().addComponents(
     new StringSelectMenuBuilder()
       .setCustomId('setup_restore_slot')
       .setPlaceholder('Choose backup slot to restore')
       .setMinValues(1)
       .setMaxValues(1)
-      .addOptions(backups.map((entry) => ({
-        label: `Slot ${entry.slot} • ${entry.name || `Backup ${entry.slot}`}`.slice(0, 100),
-        value: String(entry.slot),
-        description: (entry.createdAt || 'unknown').slice(0, 100)
-      })))
+      .addOptions(slotOptions)
   );
 
   const backRow = new ActionRowBuilder().addComponents(
@@ -396,6 +403,7 @@ async function handleSetupInteraction(interaction) {
   }
 
   if (interaction.customId === 'setup_sheet_mode') {
+    await interaction.deferUpdate().catch(() => null);
     updateConfig('googleSync.enabled', true);
     const config = getConfig();
     try {
@@ -404,26 +412,22 @@ async function handleSetupInteraction(interaction) {
         saveDb({ events: {}, futureAvailability: {}, absenceTickets: {}, players: {}, meta: { postEventCoachReminders: {}, setupWizard: {} } });
         const freshConfig = getConfig();
         const result = await syncAllToSheet(freshConfig, loadDb(), { wipe: true });
-        await interaction.update(result.ok
+        await interaction.message?.edit(result.ok
           ? { content: `✅ Fresh config completed and sheet tabs rebuilt (\`${result.spreadsheetId}\`).\nClick **Start using Firelands Bot** to finish setup.`, components: createSetupFinishRow() }
           : { content: 'Could not sync because spreadsheet ID is not configured.', components: createSetupRows() }).catch(() => null);
         return true;
       } else if (interaction.values[0] === 'load_backup') {
         const backups = (await loadSheetBackups(config).catch(() => [])).sort((a, b) => a.slot - b.slot);
-        if (!backups.length) {
-          await interaction.update({ content: 'No backup slots found in the Backups tab yet.', components: createSetupRows() }).catch(() => null);
-          return true;
-        }
-        await interaction.update({
+        await interaction.message?.edit({
           content: 'Pick a backup slot to restore. You can press **Back** to choose Fresh Config instead.',
           components: createSetupBackupRows(backups)
         }).catch(() => null);
         return true;
       } else {
-        await interaction.update({ content: 'Unknown setup action selected.', components: createSetupRows() }).catch(() => null);
+        await interaction.message?.edit({ content: 'Unknown setup action selected.', components: createSetupRows() }).catch(() => null);
       }
     } catch (error) {
-      await interaction.update({ content: `❌ Setup sheet action failed: ${error.message}`, components: createSetupRows() }).catch(() => null);
+      await interaction.message?.edit({ content: `❌ Setup sheet action failed: ${error.message}`, components: createSetupRows() }).catch(() => null);
     }
 
     return true;

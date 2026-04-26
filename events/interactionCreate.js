@@ -3507,6 +3507,15 @@ module.exports = {
           ? [createClubManagementRow(), createClubManagementRow2()]
           : [createTeamConfigActionRow(loadConfig(), team), createBackButtonRow('admin_back_team_management')]
       });
+
+      if (team === 'global' && configPath === 'channels.botCommands') {
+        const commandChannel = interaction.guild?.channels?.cache?.get(channelId);
+        if (commandChannel?.isTextBased()) {
+          await commandChannel.send(
+            '🔥 Firelands-Bot is now configured for this channel.\nPlayers can use **/player** and coaches can use **/coach** to open their bot UI.'
+          ).catch(() => null);
+        }
+      }
       return;
     }
 
