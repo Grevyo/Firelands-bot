@@ -242,9 +242,6 @@ async function handleSetupInteraction(interaction) {
   if (!interaction.isStringSelectMenu() && !interaction.isRoleSelectMenu() && !interaction.isChannelSelectMenu()) return false;
   if (!String(interaction.customId || '').startsWith('setup_')) return false;
 
-  if (interaction.customId === 'setup_role_admin') updateConfig('bot.adminRoleId', interaction.values[0]);
-  if (interaction.customId === 'setup_channel_admin') updateConfig('channels.admin', interaction.values[0]);
-
   if (interaction.customId === 'setup_sheet_mode') {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     updateConfig('googleSync.enabled', true);
@@ -269,7 +266,23 @@ async function handleSetupInteraction(interaction) {
     return true;
   }
 
-  await interaction.deferUpdate();
+  try {
+    await interaction.deferUpdate();
+  } catch (error) {
+    if (error?.code === 10062) return true;
+    throw error;
+  }
+
+  const config = getConfig();
+  if (interaction.customId === 'setup_role_admin') {
+    const roleId = interaction.values[0];
+    if (config.bot?.adminRoleId !== roleId) updateConfig('bot.adminRoleId', roleId);
+  }
+  if (interaction.customId === 'setup_channel_admin') {
+    const channelId = interaction.values[0];
+    if (config.channels?.admin !== channelId) updateConfig('channels.admin', channelId);
+  }
+
   await interaction.message?.edit({
     content: buildSetupSummary(getConfig()),
     components: createSetupRows()

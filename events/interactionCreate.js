@@ -26,10 +26,17 @@ const {
   getPlayerProfile,
   getPlayerDisplayName
 } = require('../utils/database');
-const { loadConfig, updateConfig, restoreConfigFromBackup, resetConfigFresh } = require('../utils/config');
+const { loadConfig, updateConfig, restoreConfigFromBackup, resetConfigFresh, saveConfig } = require('../utils/config');
 const { getTeamSetupProgress } = require('../utils/teamSetup');
 const { fetchCalendarEvents, titleMatchesPhrase } = require('../utils/googleCalendar');
-const { syncAllToSheet, syncConfigOnlyToSheet, appendCommandLogRow } = require('../utils/googleSheetsSync');
+const {
+  syncAllToSheet,
+  syncConfigOnlyToSheet,
+  appendCommandLogRow,
+  buildSheetsBackupSnapshot,
+  loadSheetBackups,
+  saveSheetBackupSlot
+} = require('../utils/googleSheetsSync');
 const coachCommand = require('../commands/coach');
 const adminCommand = require('../commands/admin');
 const { hasAdminAccess, adminAccessMessage } = require('../utils/adminAccess');
@@ -96,6 +103,7 @@ function createClubManagementRow() {
 
 function createClubManagementRow2() {
   return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('admin_club_action:backups').setLabel('💾 Backups').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('admin_club_action:event_type_rules').setLabel('🧭 Event Type Rules').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('admin_back_to_panel').setLabel('⬅️ Back').setStyle(ButtonStyle.Secondary)
   );
@@ -114,7 +122,6 @@ function createGoogleToolsRow2() {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('admin_google_action:view_event_locations').setLabel('📍 Event Addresses').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('admin_google_action:set_location_nickname').setLabel('🏷️ Set Address Nickname').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('admin_google_action:sync_backup').setLabel('🧰 Sync Backup').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('admin_google_action:fresh_config').setLabel('🧼 Fresh Config').setStyle(ButtonStyle.Danger),
     new ButtonBuilder().setCustomId('admin_back_club_management').setLabel('⬅️ Back').setStyle(ButtonStyle.Secondary)
   );
@@ -180,6 +187,46 @@ function createTeamConfigFixtureSettingsRow(team) {
     new ButtonBuilder().setCustomId(`admin_team_config_action:${team}:auto_assign_fixtures`).setLabel('⚡ Auto Assign Fixtures').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId(`admin_team_config_action:${team}:force_send_attendance`).setLabel('📣 Force Send Attendance').setStyle(ButtonStyle.Secondary)
   );
+}
+
+function getUpcomingFixtures(db = {}) {
+  return Object.entries(db.events || {})
+    .map(([id, event]) => ({ id, ...event }))
+    .filter((event) => new Date(event.date).getTime() >= Date.now())
+    .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+}
+
+function createFixturePagerRows(config, team, page = 0, events = []) {
+  const perPage = 9;
+  const totalPages = Math.max(1, Math.ceil(events.length / perPage));
+  const safePage = Math.min(Math.max(page, 0), totalPages - 1);
+  const pageItems = events.slice(safePage * perPage, safePage * perPage + perPage);
+
+  const numberRow = new ActionRowBuilder();
+  pageItems.forEach((event, index) => {
+    numberRow.addComponents(
+      new ButtonBuilder()
+        .setCustomId(`admin_fixture_pick:${team}:${event.id}:${safePage}`)
+        .setLabel(String(index + 1))
+        .setStyle(ButtonStyle.Primary)
+    );
+  });
+
+  const navRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`admin_fixture_page:${team}:${Math.max(0, safePage - 1)}`).setLabel('<').setStyle(ButtonStyle.Secondary).setDisabled(safePage <= 0),
+    new ButtonBuilder().setCustomId(`admin_fixture_page:${team}:${Math.min(totalPages - 1, safePage + 1)}`).setLabel('>').setStyle(ButtonStyle.Secondary).setDisabled(safePage >= totalPages - 1),
+    new ButtonBuilder().setCustomId(`admin_back_team_config:${team}`).setLabel('⬅️ Back').setStyle(ButtonStyle.Secondary)
+  );
+
+  const lines = pageItems.map((event, index) => {
+    const when = new Date(event.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    return `${index + 1}. ${when} — ${event.title} (Current: ${getTeamMeta(config, event.team).label || 'Unassigned'})`;
+  });
+
+  return {
+    text: [`Pick fixture for **${getTeamMeta(config, team).label}** (page ${safePage + 1}/${totalPages})`, ...lines].join('\n'),
+    rows: pageItems.length ? [numberRow, navRow] : [navRow]
+  };
 }
 
 function createTeamPickerButtonsRow() {
@@ -272,6 +319,7 @@ const pendingFixtureCorrections = new Map();
 const pendingAbsenceReasonModals = new Map();
 const pendingPlayerAttendDmTokens = new Map();
 const pendingLocationAliasSelections = new Map();
+const pendingSheetBackupWrites = new Map();
 
 function normalizeLocation(value = '') {
   return String(value).trim().replace(/\s+/g, ' ').toLowerCase();
@@ -556,17 +604,54 @@ function buildAbsenceTicketChannelName(config, event, profile, member, user) {
   return sanitizeChannelName(`${teamEmoji}${captainEmoji}-${displayName}-${eventDateLabel}-${event.title}`);
 }
 
-function createPlayerManagementRow(mode = 'player') {
+function createPlayerManagementRow(mode = 'player', guild = null) {
+  if (!guild) {
+    return new ActionRowBuilder().addComponents(
+      new UserSelectMenuBuilder()
+        .setCustomId('admin_player_select')
+        .setPlaceholder('Select a player to manage')
+        .setMinValues(1)
+        .setMaxValues(1)
+    );
+  }
+
+  const config = loadConfig();
+  const playerIds = new Set();
+  for (const teamKey of Object.keys(config.teams || {})) {
+    const playerRoleId = config.roles?.[teamKey]?.player;
+    const role = playerRoleId ? guild.roles.cache.get(playerRoleId) : null;
+    if (!role) continue;
+    for (const memberId of role.members.keys()) playerIds.add(memberId);
+  }
+  const options = Array.from(playerIds).slice(0, 25).map((userId) => {
+    const member = guild.members.cache.get(userId);
+    return {
+      label: (member?.displayName || member?.user?.username || userId).slice(0, 100),
+      value: userId,
+      description: `Manage player ${member?.user?.tag || userId}`.slice(0, 100)
+    };
+  });
+  if (!options.length) options.push({ label: 'No players found', value: 'none', description: 'Assign player roles first' });
+
   return new ActionRowBuilder().addComponents(
-    new UserSelectMenuBuilder()
-      .setCustomId(mode === 'coach' ? 'admin_coach_select' : 'admin_player_select')
-      .setPlaceholder(mode === 'coach' ? 'Select a coach to manage' : 'Select a player to manage')
+    new StringSelectMenuBuilder()
+      .setCustomId('admin_player_pick')
+      .setPlaceholder('Select a player to manage')
       .setMinValues(1)
       .setMaxValues(1)
+      .addOptions(options)
   );
 }
 
 function createCoachManagementRow(config, guild) {
+  if (!guild) {
+    return new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder()
+        .setCustomId('admin_coach_pick')
+        .setPlaceholder('Select a coach to manage')
+        .addOptions([{ label: 'No coaches found', value: 'none', description: 'Assign coach roles first' }])
+    );
+  }
   const coachIds = new Set();
   for (const teamKey of Object.keys(config.teams || {})) {
     const coachRoleId = config.roles?.[teamKey]?.coach;
@@ -610,7 +695,6 @@ function createPlayerProfileActionRow2(userId, mode = 'player') {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(`admin_player_action:set_teams:${userId}:${mode}`).setLabel('🧩 Teams').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId(`admin_player_action:set_gender:${userId}:${mode}`).setLabel('⚧️ Gender').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId(`admin_player_action:set_coach_positions:${userId}:${mode}`).setLabel('🧭 Coach Positions').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId(`admin_player_action:assign_roles:${userId}:${mode}`).setLabel('🎭 Assign Roles').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId(`admin_player_view_attendance:${userId}:${mode}`).setLabel('📈 Attendance').setStyle(ButtonStyle.Success)
   );
@@ -914,7 +998,7 @@ function buildPlayerProfileSummary(config, guild, user, member, profile = {}, mo
     `🪪 Name: ${realName}`,
     '',
     '**Profile**',
-    `• Discord: ${discordName}`,
+    `• Discord: https://discord.com/users/${user?.id || profile.userId}`,
     `• Real name: ${realName}`,
     `• Gender: ${profile.gender || 'not set'}`,
     `• Nickname: ${nickname || 'not set'}`,
@@ -927,8 +1011,7 @@ function buildPlayerProfileSummary(config, guild, user, member, profile = {}, mo
     '',
     ...(coachTeamLabels ? ['**Coaching**', `• Teams coaching: ${coachTeamLabels}`, ''] : []),
     '**Notes**',
-    `• Visible: ${visibleNotes.length}${hiddenCount ? ` | Hidden: ${hiddenCount}` : ''}`,
-    notesPreview,
+    visibleNotes.length ? notesPreview : 'none',
     '',
     '**Attendance summary**',
     attendanceSummary,
@@ -1220,8 +1303,35 @@ module.exports = {
         await interaction.update({
           content: '👕 Player Management: select a player to edit profile details.',
           embeds: [],
-          components: [createPlayerManagementRow('player'), createAdminBackButtonRow()]
+          components: [createPlayerManagementRow('player', interaction.guild), createAdminBackButtonRow()]
         });
+        return;
+      }
+      if (interaction.customId === 'admin_sheet_backup_create') {
+        const modal = new ModalBuilder().setCustomId('admin_sheet_backup_create_modal').setTitle('Save Sheet Backup');
+        modal.addComponents(new ActionRowBuilder().addComponents(
+          new TextInputBuilder().setCustomId('backup_name').setLabel('Backup name').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(80)
+        ));
+        await interaction.showModal(modal);
+        return;
+      }
+      if (interaction.customId === 'admin_sheet_backup_restore') {
+        const backups = (await loadSheetBackups(loadConfig()).catch(() => [])).sort((a, b) => a.slot - b.slot);
+        if (!backups.length) {
+          await interaction.update({ content: 'No backups available yet.', embeds: [], components: [createBackButtonRow('admin_back_club_management')] });
+          return;
+        }
+        const row = new ActionRowBuilder().addComponents(
+          new StringSelectMenuBuilder()
+            .setCustomId('admin_sheet_backup_restore_pick')
+            .setPlaceholder('Choose backup to restore')
+            .addOptions(backups.map((entry) => ({
+              label: `Slot ${entry.slot} • ${entry.name || `Backup ${entry.slot}`}`.slice(0, 100),
+              value: String(entry.slot),
+              description: (entry.createdAt || 'unknown').slice(0, 100)
+            })))
+        );
+        await interaction.update({ content: 'Pick backup slot to restore from Backups sheet.', embeds: [], components: [row, createBackButtonRow('admin_back_club_management')] });
         return;
       }
       if (interaction.customId.startsWith('admin_action:')) {
@@ -1240,7 +1350,7 @@ module.exports = {
           return;
         }
         if (action === 'player_management') {
-          await interaction.update({ content: '👕 Player Management: select a player to edit profile details.', embeds: [], components: [createPlayerManagementRow('player'), createAdminBackButtonRow()] });
+          await interaction.update({ content: '👕 Player Management: select a player to edit profile details.', embeds: [], components: [createPlayerManagementRow('player', interaction.guild), createAdminBackButtonRow()] });
           return;
         }
         if (action === 'coach_management') {
@@ -1286,6 +1396,21 @@ module.exports = {
             embeds: [],
             components: [createEventTypeRulesRow(), createBackButtonRow('admin_back_club_management')]
           });
+          return;
+        }
+        if (action === 'backups') {
+          const backups = await loadSheetBackups(loadConfig()).catch(() => []);
+          const lines = backups.length
+            ? backups
+              .sort((a, b) => a.slot - b.slot)
+              .map((entry) => `• Slot ${entry.slot}: **${entry.name || `Backup ${entry.slot}`}** (${entry.createdAt || 'unknown'})`)
+            : ['No sheet backups saved yet.'];
+          const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('admin_sheet_backup_create').setLabel('➕ Save Backup').setStyle(ButtonStyle.Success),
+            new ButtonBuilder().setCustomId('admin_sheet_backup_restore').setLabel('♻️ Restore Backup').setStyle(ButtonStyle.Primary),
+            new ButtonBuilder().setCustomId('admin_back_club_management').setLabel('⬅️ Back').setStyle(ButtonStyle.Secondary)
+          );
+          await interaction.update({ content: `💾 Sheet Backups (max 5 slots)\n${lines.join('\n')}`, embeds: [], components: [row] });
           return;
         }
       }
@@ -2289,6 +2414,84 @@ module.exports = {
         return;
       }
 
+      if (interaction.customId === 'admin_player_pick') {
+        const userId = interaction.values[0];
+        if (userId === 'none') {
+          await interaction.reply({ content: 'No players found yet. Assign player roles first.', flags: MessageFlags.Ephemeral });
+          return;
+        }
+        const member = await interaction.guild.members.fetch(userId).catch(() => null);
+        const user = member?.user || await interaction.client.users.fetch(userId).catch(() => null);
+        const existing = getPlayerProfile(userId) || {};
+        const inferredPlayerTeams = Object.keys(loadConfig().roles || {}).filter((teamKey) => {
+          const roleId = loadConfig().roles?.[teamKey]?.player;
+          return roleId && roleId !== 'ROLE_ID' && member?.roles?.cache?.has(roleId);
+        });
+        const inferredCoachTeams = Object.keys(loadConfig().roles || {}).filter((teamKey) => {
+          const roleId = loadConfig().roles?.[teamKey]?.coach;
+          return roleId && roleId !== 'ROLE_ID' && member?.roles?.cache?.has(roleId);
+        });
+        const seeded = upsertPlayerProfile(userId, {
+          userId,
+          customName: existing.customName || '',
+          shirtNumber: existing.shirtNumber || '',
+          teams: Array.from(new Set([...(existing.teams || []), ...inferredPlayerTeams])),
+          coachTeams: Array.from(new Set([...(existing.coachTeams || []), ...inferredCoachTeams])),
+          roles: existing.roles || (member ? Array.from(member.roles.cache.keys()).filter((id) => id !== interaction.guild.id) : []),
+          joinedDiscordAt: existing.joinedDiscordAt || (member?.joinedAt ? member.joinedAt.toISOString().slice(0, 10) : ''),
+          faceImageUrl: existing.faceImageUrl || existing.facePngUrl || '',
+          facePngUrl: existing.faceImageUrl || existing.facePngUrl || '',
+          notes: existing.notes || ''
+        });
+
+        await interaction.update({
+          content: buildPlayerProfileSummary(loadConfig(), interaction.guild, user, member, seeded, 'player'),
+          embeds: [],
+          components: [createPlayerProfileActionRow(userId, 'player'), createPlayerProfileActionRow2(userId, 'player'), createBackButtonRow('admin_back_player_management')]
+        });
+        await triggerGoogleSync(context);
+        return;
+      }
+
+      if (interaction.customId === 'admin_sheet_backup_restore_pick') {
+        const slot = Number.parseInt(interaction.values[0] || '0', 10);
+        const backups = await loadSheetBackups(loadConfig()).catch(() => []);
+        const picked = backups.find((entry) => entry.slot === slot);
+        if (!picked?.snapshot) {
+          await interaction.update({ content: 'Backup slot is empty.', embeds: [], components: [createBackButtonRow('admin_back_club_management')] });
+          return;
+        }
+        try {
+          const parsed = JSON.parse(picked.snapshot);
+          if (parsed.config) {
+            const merged = { ...parsed.config, _configBackups: loadConfig()._configBackups || [] };
+            saveConfig(merged);
+            context.setConfig?.(merged);
+          }
+          if (parsed.db) saveDb(parsed.db);
+          await triggerGoogleSync(context);
+          await interaction.update({ content: `✅ Restored backup slot ${slot}: **${picked.name || `Backup ${slot}`}**.`, embeds: [], components: [createBackButtonRow('admin_back_club_management')] });
+        } catch (error) {
+          await interaction.update({ content: `Could not restore backup: ${error.message}`, embeds: [], components: [createBackButtonRow('admin_back_club_management')] });
+        }
+        return;
+      }
+
+      if (interaction.customId.startsWith('admin_sheet_backup_overwrite_pick:')) {
+        const token = interaction.customId.split(':')[1];
+        const pending = pendingSheetBackupWrites.get(token);
+        pendingSheetBackupWrites.delete(token);
+        if (!pending) {
+          await interaction.update({ content: 'Backup request expired. Try again.', embeds: [], components: [createBackButtonRow('admin_back_club_management')] });
+          return;
+        }
+        const slot = Number.parseInt(interaction.values[0] || '1', 10);
+        const snapshot = JSON.stringify(buildSheetsBackupSnapshot(loadConfig(), loadDb()));
+        await saveSheetBackupSlot(loadConfig(), { slot, name: pending.name, createdBy: `${interaction.user.tag}`, summary: pending.summary, snapshot });
+        await interaction.update({ content: `✅ Saved backup **${pending.name}** to slot ${slot}.`, embeds: [], components: [createBackButtonRow('admin_back_club_management')] });
+        return;
+      }
+
       if (interaction.customId === 'admin_event_type_rules_action') {
         const selected = interaction.values[0];
         const latestConfig = loadConfig();
@@ -2644,11 +2847,7 @@ module.exports = {
 
         if (selectedAction === 'fixture_team') {
           const db = loadDb();
-          const upcomingEvents = Object.entries(db.events)
-            .map(([id, event]) => ({ id, ...event }))
-            .filter((event) => new Date(event.date).getTime() >= Date.now())
-            .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
-            .slice(0, 25);
+          const upcomingEvents = getUpcomingFixtures(db);
 
           if (!upcomingEvents.length) {
             await interaction.update({
@@ -2659,26 +2858,12 @@ module.exports = {
             return;
           }
 
-          const row = new ActionRowBuilder().addComponents(
-            new StringSelectMenuBuilder()
-              .setCustomId(`admin_set_fixture_team:${team}`)
-              .setPlaceholder(`Select fixture for ${teamLabel}`)
-              .addOptions(
-                upcomingEvents.map((event) => {
-                  const when = new Date(event.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-                  return {
-                    label: `${when} — ${event.title}`.slice(0, 100),
-                    value: event.id,
-                    description: `Current: ${getTeamMeta(config, event.team).label || 'Unassigned'}`.slice(0, 100)
-                  };
-                })
-              )
-          );
+          const pager = createFixturePagerRows(config, team, 0, upcomingEvents);
 
           await interaction.update({
-            content: `Pick a fixture to assign to **${teamLabel}**.`,
+            content: pager.text,
             embeds: [],
-            components: [row, createBackButtonRow(`admin_back_team_config:${team}`)]
+            components: pager.rows
           });
           return;
         }
@@ -2762,10 +2947,17 @@ module.exports = {
         return;
       }
 
-      if (interaction.customId.startsWith('admin_set_fixture_team:')) {
+      if (interaction.customId.startsWith('admin_fixture_page:')) {
+        const [, team, pageRaw] = interaction.customId.split(':');
+        const page = Number.parseInt(pageRaw || '0', 10) || 0;
+        const pager = createFixturePagerRows(loadConfig(), team, page, getUpcomingFixtures(loadDb()));
+        await interaction.update({ content: pager.text, embeds: [], components: pager.rows });
+        return;
+      }
+
+      if (interaction.customId.startsWith('admin_fixture_pick:')) {
         await interaction.deferUpdate();
-        const team = interaction.customId.split(':')[1];
-        const eventId = interaction.values[0];
+        const [, team, eventId, pageRaw] = interaction.customId.split(':');
         const db = loadDb();
         const target = db.events[eventId];
 
@@ -2785,7 +2977,7 @@ module.exports = {
         await interaction.editReply({
           content: `✅ Assigned **${target.title}** to **${getTeamMeta(config, team).label}**.`,
           embeds: [],
-          components: [createTeamConfigActionRow(config, team), createBackButtonRow('admin_back_team_management')]
+          components: createFixturePagerRows(loadConfig(), team, Number.parseInt(pageRaw || '0', 10) || 0, getUpcomingFixtures(loadDb())).rows
         });
         return;
       }
@@ -3094,6 +3286,18 @@ module.exports = {
       await interaction.deferUpdate();
       const [, configPath, team] = interaction.customId.split(':');
       const channelId = interaction.values[0];
+      const currentConfig = loadConfig();
+      const currentValue = configPath.split('.').reduce((acc, key) => (acc ? acc[key] : undefined), currentConfig);
+      if (String(currentValue || '') === String(channelId || '')) {
+        await interaction.editReply({
+          content: `${renderProgressMessage(100, `Channel already set to <#${channelId}>. No changes needed.`)}`,
+          embeds: [],
+          components: team === 'global'
+            ? [createClubManagementRow(), createClubManagementRow2()]
+            : [createTeamConfigActionRow(loadConfig(), team), createBackButtonRow('admin_back_team_management')]
+        });
+        return;
+      }
       await setProgressReply(interaction, 0, 'Updating channel setting...');
       updateConfig(configPath, channelId);
       await setProgressReply(interaction, 40, 'Saving channel ID...');
@@ -3512,6 +3716,46 @@ module.exports = {
         ].join('\n'),
         flags: MessageFlags.Ephemeral
       });
+      return;
+    }
+
+    if (interaction.isModalSubmit() && interaction.customId === 'admin_sheet_backup_create_modal') {
+      if (!hasAdminAccess(interaction.member, config)) {
+        await denyAdminAccess();
+        return;
+      }
+      const name = interaction.fields.getTextInputValue('backup_name').trim();
+      if (!name) {
+        await interaction.reply({ content: 'Backup name is required.', flags: MessageFlags.Ephemeral });
+        return;
+      }
+      const backups = await loadSheetBackups(loadConfig()).catch(() => []);
+      const used = new Set(backups.map((entry) => entry.slot));
+      const freeSlot = [1, 2, 3, 4, 5].find((slot) => !used.has(slot));
+      const summary = `events:${Object.keys(loadDb().events || {}).length}, players:${Object.keys(loadDb().players || {}).length}`;
+
+      if (freeSlot) {
+        const snapshot = JSON.stringify(buildSheetsBackupSnapshot(loadConfig(), loadDb()));
+        await saveSheetBackupSlot(loadConfig(), { slot: freeSlot, name, createdBy: `${interaction.user.tag}`, summary, snapshot });
+        await interaction.reply({ content: `✅ Saved backup **${name}** in slot ${freeSlot}.`, flags: MessageFlags.Ephemeral });
+        return;
+      }
+
+      const token = Math.random().toString(36).slice(2, 12);
+      pendingSheetBackupWrites.set(token, { name, summary });
+      const row = new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+          .setCustomId(`admin_sheet_backup_overwrite_pick:${token}`)
+          .setPlaceholder('Pick slot to overwrite (5/5 used)')
+          .addOptions(backups
+            .sort((a, b) => a.slot - b.slot)
+            .map((entry) => ({
+              label: `Slot ${entry.slot} • ${entry.name || `Backup ${entry.slot}`}`.slice(0, 100),
+              value: String(entry.slot),
+              description: (entry.createdAt || 'unknown').slice(0, 100)
+            })))
+      );
+      await interaction.reply({ content: 'Backups are full (5/5). Choose which slot to overwrite.', components: [row], flags: MessageFlags.Ephemeral });
       return;
     }
 
