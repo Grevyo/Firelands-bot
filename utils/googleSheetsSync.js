@@ -92,6 +92,16 @@ function expandRangeForValues(range = '', values = []) {
   return `${sheet}!${startCol}${startRow}:${toColumnLabel(requiredEndIndex)}${endRow || ''}`;
 }
 
+function splitIntoCellChunks(value = '', maxChars = 45000) {
+  const text = String(value || '');
+  if (!text) return [''];
+  const chunks = [];
+  for (let index = 0; index < text.length; index += maxChars) {
+    chunks.push(text.slice(index, index + maxChars));
+  }
+  return chunks;
+}
+
 async function getSheetsClient(config = {}) {
   const auth = new google.auth.GoogleAuth({
     keyFile: resolveCredentialsPath(config),
@@ -667,12 +677,13 @@ async function loadSheetBackups(config = {}) {
   if (!spreadsheetId) return [];
   const sheets = await getSheetsClient(config);
   const backupsRange = config.googleSync?.sheetBackupsRange || 'Backups!A2:F';
+  const title = getSheetNameFromRange(backupsRange);
 
   await ensureSheetLayout(sheets, spreadsheetId, [
     { range: backupsRange, headers: ['slot', 'name', 'createdAt', 'createdBy', 'summary', 'snapshot'] }
   ]);
 
-  const response = await sheets.spreadsheets.values.get({ spreadsheetId, range: backupsRange }).catch(() => ({ data: { values: [] } }));
+  const response = await sheets.spreadsheets.values.get({ spreadsheetId, range: `${title}!A2:ZZ` }).catch(() => ({ data: { values: [] } }));
   const rows = response.data.values || [];
   return rows
     .map((row) => ({
@@ -681,7 +692,7 @@ async function loadSheetBackups(config = {}) {
       createdAt: row[2] || '',
       createdBy: row[3] || '',
       summary: row[4] || '',
-      snapshot: row[5] || ''
+      snapshot: row.slice(5).join('')
     }))
     .filter((entry) => Number.isInteger(entry.slot) && entry.slot >= 1 && entry.slot <= 5);
 }
@@ -699,12 +710,21 @@ async function saveSheetBackupSlot(config = {}, { slot = 1, name = '', createdBy
     { range: backupsRange, headers: ['slot', 'name', 'createdAt', 'createdBy', 'summary', 'snapshot'] }
   ]);
 
+  const snapshotChunks = splitIntoCellChunks(snapshot);
+  const rowValues = [row, name, toIso(), createdBy, summary, ...snapshotChunks];
+  const endCol = toColumnLabel(rowValues.length);
+
+  await sheets.spreadsheets.values.clear({
+    spreadsheetId,
+    range: `${title}!A${row + 1}:ZZ${row + 1}`
+  });
+
   await sheets.spreadsheets.values.update({
     spreadsheetId,
-    range: `${title}!A${row + 1}:F${row + 1}`,
+    range: `${title}!A${row + 1}:${endCol}${row + 1}`,
     valueInputOption: 'RAW',
     requestBody: {
-      values: [[row, name, toIso(), createdBy, summary, snapshot]]
+      values: [rowValues]
     }
   });
 

@@ -194,6 +194,13 @@ function summarizeInteractionContext(interaction) {
   return parts.join(' | ');
 }
 
+function formatInteractionError(error) {
+  const code = error?.code ? `code=${error.code}` : '';
+  const status = error?.status ? `status=${error.status}` : '';
+  const message = String(error?.message || 'Unknown error');
+  return [message, code, status].filter(Boolean).join(' | ');
+}
+
 async function logCommandUsage(interaction) {
   try {
     const config = getConfig();
@@ -221,9 +228,9 @@ async function logCommandUsage(interaction) {
   }
 }
 
-async function sendLog(message) {
+async function sendLog(message, fallbackChannelId = '') {
   const config = getConfig();
-  const logsChannelId = config.channels.admin || config.channels.logs;
+  const logsChannelId = config.channels.admin || config.channels.logs || fallbackChannelId;
 
   if (!logsChannelId) return;
 
@@ -653,13 +660,16 @@ client.on('interactionCreate', async (interaction) => {
 
     await interactionHandler.execute(interaction, { getConfig, sendLog });
   } catch (error) {
-    console.error('Interaction handling failed:', error);
-    await sendLog(`❌ Interaction failed: ${error.message}\n${summarizeInteractionContext(interaction)}`);
+    console.error('Interaction handling failed:', formatInteractionError(error));
+    const isAlreadyAcknowledged = error?.code === 40060 || /already been acknowledged/i.test(String(error?.message || ''));
+    if (!isAlreadyAcknowledged) {
+      await sendLog(`❌ Interaction failed: ${error.message}\n${summarizeInteractionContext(interaction)}`, interaction?.channelId);
+    }
 
     const isUnknownInteraction = error?.code === 10062;
-    if (!isUnknownInteraction && interaction.isRepliable() && !interaction.replied && !interaction.deferred) {
+    if (!isAlreadyAcknowledged && !isUnknownInteraction && interaction.isRepliable() && !interaction.replied && !interaction.deferred) {
       try {
-        await interaction.reply({ content: `Something went wrong. Error logged to admin chat.\nReason: ${error.message}`, flags: MessageFlags.Ephemeral });
+        await interaction.reply({ content: `Something went wrong. Error logged to the configured logs channel.\nReason: ${error.message}`, flags: MessageFlags.Ephemeral });
       } catch (replyError) {
         console.error('Failed to send interaction error reply:', replyError);
       }
