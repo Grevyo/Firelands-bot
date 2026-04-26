@@ -28,7 +28,6 @@ const { startReminderJobs } = require('./utils/reminders');
 const { ensureConfig, loadConfig, updateConfig, resetConfigFresh } = require('./utils/config');
 const {
   syncAllToSheet,
-  syncConfigOnlyToSheet,
   appendCommandLogRow,
   loadSheetBackups,
   restoreSpreadsheetFromBackupSnapshot
@@ -62,6 +61,24 @@ client.commands.set(adminCommand.data.name, adminCommand);
 client.commands.set(confirmCommand.data.name, confirmCommand);
 const missingAttendanceConfigWarnings = new Set();
 
+function buildSetupWelcome() {
+  return [
+    '👋 **Welcome to Firelands Bot**',
+    '',
+    'This setup will guide you through the essentials and get your club ready quickly.',
+    '',
+    '**Core features:**',
+    '• Attendance tracking and fixture notifications.',
+    '• Admin controls for team and channel configuration.',
+    '• Google Sheets sync plus full-sheet backups (up to 5 slots).',
+    '• Backup restore to repopulate all synced tabs from one saved snapshot.',
+    '',
+    'Made by **George Villiers** and published by **Grev**.',
+    '',
+    'Press **Get Started** to open the setup wizard.'
+  ].join('\n');
+}
+
 function buildSetupSummary(config) {
   const adminRole = config.bot?.adminRoleId ? `<@&${config.bot.adminRoleId}>` : 'not set';
   const adminChannel = config.channels?.admin ? `<#${config.channels.admin}>` : 'not set';
@@ -75,8 +92,7 @@ function buildSetupSummary(config) {
     '',
     'Then choose initialization mode (this final step will complete and remove this wizard message):',
     '• **Fresh Config + Empty Sheets** = wipe data, rebuild all tabs with headings only.',
-    '• **Load Backup Slot** = restore all non-Backups tabs from a saved slot.',
-    '• **Sync Config Only** = keep data and only push config tabs.'
+    '• **Load Backup Slot** = restore every synced tab from one saved backup line in the Backups sheet (max 5 slots).'
   ].join('\n');
 }
 
@@ -103,11 +119,53 @@ function createSetupRows() {
         .setPlaceholder('Choose setup action')
         .addOptions([
           { label: 'Fresh Config + Empty Sheets', value: 'fresh_config' },
-          { label: 'Load Backup Slot', value: 'load_backup' },
-          { label: 'Sync Config Only (preserve data)', value: 'config_only' }
+          { label: 'Load Backup Slot', value: 'load_backup' }
         ])
     )
   ];
+}
+
+function createSetupWelcomeRows() {
+  return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId('setup_get_started')
+        .setLabel('Get Started')
+        .setStyle(ButtonStyle.Success)
+    )
+  ];
+}
+
+function createSetupFinishRow() {
+  return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId('setup_finish')
+        .setLabel('Start using Firelands Bot')
+        .setStyle(ButtonStyle.Success)
+    )
+  ];
+}
+
+function progressBar(percent = 0, width = 20) {
+  const safePercent = Math.min(100, Math.max(0, Number.isFinite(percent) ? Math.round(percent) : 0));
+  const filled = Math.round((safePercent / 100) * width);
+  return `[${'█'.repeat(filled)}${'░'.repeat(Math.max(0, width - filled))}] ${safePercent}%`;
+}
+
+function buildSetupRestoreProgressText(slot, progressState, done = false) {
+  const safePercent = done ? 100 : Math.min(100, Math.max(0, Math.round(progressState.percent || 0)));
+  return [
+    `${done ? '✅' : '♻️'} ${done ? 'Backup import completed' : `Importing backup slot ${slot}`}`,
+    '',
+    `Loading: **${progressBar(safePercent)}**`,
+    `ETA: **${Math.max(0, Math.round((progressState.etaMs || 0) / 1000))}s**`,
+    `Current tab: ${progressState.currentTab || (done ? 'Complete' : 'starting…')}`,
+    '',
+    ...(progressState.tabs?.length ? progressState.tabs.map((tab) => `• ${tab}${!done && tab === progressState.currentTab ? ' ⏳' : ''}`) : ['• no tabs']),
+    '',
+    done ? 'Click **Start using Firelands Bot** to finish setup.' : 'Please wait while Firelands imports this backup into all synced Google Sheet tabs.'
+  ].join('\n');
 }
 
 function getConfig() {
@@ -237,18 +295,61 @@ function findGuildSetupChannel(guild) {
   return candidate || null;
 }
 
+function hasCompletedSetupWizard(guildId) {
+  const db = loadDb();
+  return Boolean(db.meta?.setupWizard?.[guildId]?.completedAt);
+}
+
+function markSetupWizardCompleted(guildId) {
+  const db = loadDb();
+  if (!db.meta) db.meta = {};
+  if (!db.meta.setupWizard) db.meta.setupWizard = {};
+  db.meta.setupWizard[guildId] = {
+    ...(db.meta.setupWizard[guildId] || {}),
+    completedAt: new Date().toISOString()
+  };
+  saveDb(db);
+}
+
 async function postSetupWizardToGuild(guild) {
+  if (hasCompletedSetupWizard(guild.id)) return;
   const setupChannel = findGuildSetupChannel(guild);
   if (!setupChannel) return;
   await setupChannel.send({
-    content: buildSetupSummary(getConfig()),
-    components: createSetupRows()
+    content: buildSetupWelcome(),
+    components: createSetupWelcomeRows()
   }).catch(() => null);
 }
 
+async function finalizeSetupWizard(interaction) {
+  if (interaction.guildId) markSetupWizardCompleted(interaction.guildId);
+  await interaction.message?.delete().catch(() => null);
+
+  const config = getConfig();
+  const adminChannelId = config.channels?.admin || interaction.channelId;
+  if (!adminChannelId) return;
+
+  const adminChannel = await interaction.client.channels.fetch(adminChannelId).catch(() => null);
+  if (!adminChannel?.isTextBased()) return;
+  await adminChannel.send('✅ Firelands Bot setup is complete and the bot is ready to be used.').catch(() => null);
+}
+
 async function handleSetupInteraction(interaction) {
-  if (!interaction.isStringSelectMenu() && !interaction.isRoleSelectMenu() && !interaction.isChannelSelectMenu()) return false;
+  if (!interaction.isButton() && !interaction.isStringSelectMenu() && !interaction.isRoleSelectMenu() && !interaction.isChannelSelectMenu()) return false;
   if (!String(interaction.customId || '').startsWith('setup_')) return false;
+
+  if (interaction.customId === 'setup_get_started' && interaction.isButton()) {
+    await interaction.update({
+      content: buildSetupSummary(getConfig()),
+      components: createSetupRows()
+    }).catch(() => null);
+    return true;
+  }
+  if (interaction.customId === 'setup_finish' && interaction.isButton()) {
+    await interaction.deferUpdate().catch(() => null);
+    await finalizeSetupWizard(interaction);
+    return true;
+  }
 
   if (interaction.customId === 'setup_sheet_mode') {
     try {
@@ -271,12 +372,13 @@ async function handleSetupInteraction(interaction) {
     try {
       if (interaction.values[0] === 'fresh_config') {
         resetConfigFresh();
-        saveDb({ events: {}, futureAvailability: {}, absenceTickets: {}, players: {}, meta: { postEventCoachReminders: {} } });
+        saveDb({ events: {}, futureAvailability: {}, absenceTickets: {}, players: {}, meta: { postEventCoachReminders: {}, setupWizard: {} } });
         const freshConfig = getConfig();
         const result = await syncAllToSheet(freshConfig, loadDb(), { wipe: true });
         if (!await safeEditReply(result.ok
-          ? `✅ Fresh config completed and sheet tabs rebuilt (\`${result.spreadsheetId}\`).`
+          ? { content: `✅ Fresh config completed and sheet tabs rebuilt (\`${result.spreadsheetId}\`).\nClick **Start using Firelands Bot** to finish setup.`, components: createSetupFinishRow() }
           : 'Could not sync because spreadsheet ID is not configured.')) return true;
+        return true;
       } else if (interaction.values[0] === 'load_backup') {
         const backups = (await loadSheetBackups(config).catch(() => [])).sort((a, b) => a.slot - b.slot);
         if (!backups.length) {
@@ -297,22 +399,13 @@ async function handleSetupInteraction(interaction) {
         );
         if (!await safeEditReply({ content: 'Pick a backup slot to restore.', components: [row] })) return true;
         return true;
-      } else if (interaction.values[0] === 'fresh') {
-        const result = await syncAllToSheet(config, loadDb(), { wipe: true });
-        if (!await safeEditReply(result.ok
-          ? `✅ Fresh sheet sync completed (\`${result.spreadsheetId}\`).`
-          : 'Could not sync because spreadsheet ID is not configured.')) return true;
       } else {
-        const result = await syncConfigOnlyToSheet(config);
-        if (!await safeEditReply(result.ok
-          ? `✅ Config-only sync completed (\`${result.spreadsheetId}\`). Existing sheet data was preserved.`
-          : 'Could not sync because spreadsheet ID is not configured.')) return true;
+        if (!await safeEditReply('Unknown setup action selected.')) return true;
       }
     } catch (error) {
       if (!await safeEditReply(`❌ Setup sheet action failed: ${error.message}`)) return true;
     }
 
-    await interaction.message?.delete().catch(() => null);
     return true;
   }
 
@@ -329,24 +422,24 @@ async function handleSetupInteraction(interaction) {
     try {
       const parsed = JSON.parse(picked.snapshot);
       const progressState = { percent: 0, etaMs: 0, currentTab: '', tabs: [] };
-      const toProgressText = (title) => [
-        title,
-        '',
-        `Progress: **${progressState.percent}%**`,
-        `ETA: **${Math.max(0, Math.round(progressState.etaMs / 1000))}s**`,
-        `Current tab: ${progressState.currentTab || 'starting…'}`,
-        '',
-        ...(progressState.tabs.length ? progressState.tabs.map((tab) => `• ${tab}${tab === progressState.currentTab ? ' ⏳' : ''}`) : ['• no tabs'])
-      ].join('\n');
-
-      await interaction.message?.edit({ content: toProgressText(`♻️ Restoring backup slot ${slot}...`), components: [] }).catch(() => null);
+      let lastProgressEdit = 0;
+      await interaction.message?.edit({ content: buildSetupRestoreProgressText(slot, progressState), components: [] }).catch(() => null);
       await restoreSpreadsheetFromBackupSnapshot(config, parsed, (progress) => {
         progressState.percent = progress.percent;
         progressState.etaMs = progress.etaMs;
         progressState.currentTab = progress.currentTab;
         progressState.tabs = progress.tabs || [];
+        const now = Date.now();
+        if (now - lastProgressEdit >= 1500) {
+          lastProgressEdit = now;
+          interaction.message?.edit({ content: buildSetupRestoreProgressText(slot, progressState), components: [] }).catch(() => null);
+        }
       });
-      await interaction.message?.edit({ content: toProgressText(`✅ Restored setup backup from slot ${slot}.`), components: [] }).catch(() => null);
+      progressState.percent = 100;
+      await interaction.message?.edit({
+        content: buildSetupRestoreProgressText(slot, progressState, true),
+        components: createSetupFinishRow()
+      }).catch(() => null);
     } catch (error) {
       await interaction.message?.edit({ content: `❌ Failed to restore slot ${slot}: ${error.message}`, components: createSetupRows() }).catch(() => null);
     }
