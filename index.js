@@ -147,6 +147,30 @@ function createSetupFinishRow() {
   ];
 }
 
+function createSetupBackupRows(backups = []) {
+  const backupPickerRow = new ActionRowBuilder().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId('setup_restore_slot')
+      .setPlaceholder('Choose backup slot to restore')
+      .setMinValues(1)
+      .setMaxValues(1)
+      .addOptions(backups.map((entry) => ({
+        label: `Slot ${entry.slot} • ${entry.name || `Backup ${entry.slot}`}`.slice(0, 100),
+        value: String(entry.slot),
+        description: (entry.createdAt || 'unknown').slice(0, 100)
+      })))
+  );
+
+  const backRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('setup_back_to_mode')
+      .setLabel('Back')
+      .setStyle(ButtonStyle.Secondary)
+  );
+
+  return [backupPickerRow, backRow];
+}
+
 function progressBar(percent = 0, width = 20) {
   const safePercent = Math.min(100, Math.max(0, Number.isFinite(percent) ? Math.round(percent) : 0));
   const filled = Math.round((safePercent / 100) * width);
@@ -330,15 +354,21 @@ async function postSetupWizardToGuild(guild) {
 
 async function finalizeSetupWizard(interaction) {
   if (interaction.guildId) markSetupWizardCompleted(interaction.guildId);
-  await interaction.message?.delete().catch(() => null);
+  const setupChannel = interaction.channel;
+  if (!setupChannel?.isTextBased()) return;
 
-  const config = getConfig();
-  const adminChannelId = config.channels?.admin || interaction.channelId;
-  if (!adminChannelId) return;
-
-  const adminChannel = await interaction.client.channels.fetch(adminChannelId).catch(() => null);
-  if (!adminChannel?.isTextBased()) return;
-  await adminChannel.send('✅ Firelands Bot setup is complete and the bot is ready to be used.').catch(() => null);
+  const recentMessages = await setupChannel.messages.fetch({ limit: 50 }).catch(() => null);
+  if (recentMessages) {
+    const setupMessages = recentMessages.filter((message) => {
+      if (message.author?.id !== interaction.client.user?.id) return false;
+      const text = `${message.content || ''} ${(message.components || []).map((row) => row.components.map((component) => component.customId || '').join(' ')).join(' ')}`;
+      return text.includes('setup_')
+        || text.includes('Firelands Setup Wizard')
+        || text.includes('Welcome to Firelands Bot')
+        || text.includes('Start using Firelands Bot');
+    });
+    await Promise.all(setupMessages.map((message) => message.delete().catch(() => null)));
+  }
 }
 
 async function handleSetupInteraction(interaction) {
@@ -357,60 +387,43 @@ async function handleSetupInteraction(interaction) {
     await finalizeSetupWizard(interaction);
     return true;
   }
+  if (interaction.customId === 'setup_back_to_mode' && interaction.isButton()) {
+    await interaction.update({
+      content: buildSetupSummary(getConfig()),
+      components: createSetupRows()
+    }).catch(() => null);
+    return true;
+  }
 
   if (interaction.customId === 'setup_sheet_mode') {
-    try {
-      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-    } catch (error) {
-      if (error?.code === 10062) return true;
-      throw error;
-    }
     updateConfig('googleSync.enabled', true);
     const config = getConfig();
-    const safeEditReply = async (payload) => {
-      try {
-        await interaction.editReply(payload);
-      } catch (error) {
-        if (error?.code === 10062) return false;
-        throw error;
-      }
-      return true;
-    };
     try {
       if (interaction.values[0] === 'fresh_config') {
         resetConfigFresh();
         saveDb({ events: {}, futureAvailability: {}, absenceTickets: {}, players: {}, meta: { postEventCoachReminders: {}, setupWizard: {} } });
         const freshConfig = getConfig();
         const result = await syncAllToSheet(freshConfig, loadDb(), { wipe: true });
-        if (!await safeEditReply(result.ok
+        await interaction.update(result.ok
           ? { content: `✅ Fresh config completed and sheet tabs rebuilt (\`${result.spreadsheetId}\`).\nClick **Start using Firelands Bot** to finish setup.`, components: createSetupFinishRow() }
-          : 'Could not sync because spreadsheet ID is not configured.')) return true;
+          : { content: 'Could not sync because spreadsheet ID is not configured.', components: createSetupRows() }).catch(() => null);
         return true;
       } else if (interaction.values[0] === 'load_backup') {
         const backups = (await loadSheetBackups(config).catch(() => [])).sort((a, b) => a.slot - b.slot);
         if (!backups.length) {
-          if (!await safeEditReply('No backup slots found in the Backups tab yet.')) return true;
+          await interaction.update({ content: 'No backup slots found in the Backups tab yet.', components: createSetupRows() }).catch(() => null);
           return true;
         }
-        const row = new ActionRowBuilder().addComponents(
-          new StringSelectMenuBuilder()
-            .setCustomId('setup_restore_slot')
-            .setPlaceholder('Choose backup slot to restore')
-            .setMinValues(1)
-            .setMaxValues(1)
-            .addOptions(backups.map((entry) => ({
-              label: `Slot ${entry.slot} • ${entry.name || `Backup ${entry.slot}`}`.slice(0, 100),
-              value: String(entry.slot),
-              description: (entry.createdAt || 'unknown').slice(0, 100)
-            })))
-        );
-        if (!await safeEditReply({ content: 'Pick a backup slot to restore.', components: [row] })) return true;
+        await interaction.update({
+          content: 'Pick a backup slot to restore. You can press **Back** to choose Fresh Config instead.',
+          components: createSetupBackupRows(backups)
+        }).catch(() => null);
         return true;
       } else {
-        if (!await safeEditReply('Unknown setup action selected.')) return true;
+        await interaction.update({ content: 'Unknown setup action selected.', components: createSetupRows() }).catch(() => null);
       }
     } catch (error) {
-      if (!await safeEditReply(`❌ Setup sheet action failed: ${error.message}`)) return true;
+      await interaction.update({ content: `❌ Setup sheet action failed: ${error.message}`, components: createSetupRows() }).catch(() => null);
     }
 
     return true;
