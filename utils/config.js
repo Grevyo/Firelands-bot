@@ -13,7 +13,7 @@ function defaultConfig() {
       adminRoleId: process.env.ADMIN_ROLE_ID || '',
       playerCommandRoleId: process.env.PLAYER_COMMAND_ROLE_ID || '',
       coachCommandRoleId: process.env.COACH_COMMAND_ROLE_ID || '',
-      calendarId: process.env.CALENDAR_ID || 'hello@firelandsunited.com',
+      calendarId: process.env.CALENDAR_ID || '',
       calendarCredentialsPath: process.env.CALENDAR_CREDENTIALS_PATH || process.env.GOOGLE_APPLICATION_CREDENTIALS || 'credentials.json'
     },
     roles: {
