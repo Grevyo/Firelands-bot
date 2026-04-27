@@ -84,7 +84,7 @@ function defaultConfig() {
       womensFixturesRange: process.env.GOOGLE_WOMENS_FIXTURES_RANGE || 'Womens Fixtures!A2:F',
       attendanceRange: process.env.GOOGLE_ATTENDANCE_RANGE || 'Attendance!A2:F',
       configRange: process.env.GOOGLE_CONFIG_RANGE || 'Config!A2:C',
-      configIdsRange: process.env.GOOGLE_CONFIG_IDS_RANGE || 'Config IDs!A2:C',
+      configIdsRange: process.env.GOOGLE_CONFIG_IDS_RANGE || 'Config!A2:C',
       playersRange: process.env.GOOGLE_PLAYERS_RANGE || 'Player and Coach Management!A2:Q',
       teamFixturesRanges: {
         mens: process.env.GOOGLE_MENS_FIXTURES_RANGE || 'Mens Fixtures!A2:G',
@@ -97,11 +97,21 @@ function defaultConfig() {
 
 function ensureConfig() {
   if (!fs.existsSync(CONFIG_PATH)) {
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify(defaultConfig(), null, 2));
-    return;
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify({}, null, 2));
   }
+}
 
-  const current = loadConfig();
+function loadRawConfig() {
+  try {
+    const raw = fs.readFileSync(CONFIG_PATH, 'utf8');
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function buildRuntimeConfig(current = {}) {
   const base = defaultConfig();
   const currentRoles = current.roles || {};
   const currentTeams = current.teams || {};
@@ -173,20 +183,17 @@ function ensureConfig() {
     }
   };
 
-  fs.writeFileSync(CONFIG_PATH, JSON.stringify(merged, null, 2));
+  return merged;
 }
 
 function loadConfig() {
-  try {
-    const raw = fs.readFileSync(CONFIG_PATH, 'utf8');
-    return JSON.parse(raw);
-  } catch {
-    return defaultConfig();
-  }
+  ensureConfig();
+  return buildRuntimeConfig(loadRawConfig());
 }
 
 function saveConfig(config) {
-  fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
+  const safeConfig = config && typeof config === 'object' ? config : {};
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(safeConfig, null, 2));
 }
 
 function cloneWithoutBackups(config = {}) {
@@ -209,7 +216,7 @@ function pushConfigBackup(config = {}, meta = {}) {
 }
 
 function updateConfig(pathKey, value) {
-  const config = loadConfig();
+  const config = loadRawConfig();
   const keys = pathKey.split('.');
 
   let pointer = config;
@@ -232,7 +239,7 @@ function updateConfig(pathKey, value) {
 }
 
 function restoreConfigFromBackup(index = 0) {
-  const config = loadConfig();
+  const config = loadRawConfig();
   const backups = Array.isArray(config._configBackups) ? config._configBackups : [];
   const target = backups[index];
   if (!target?.snapshot) return null;
@@ -250,25 +257,12 @@ function restoreConfigFromBackup(index = 0) {
 }
 
 function resetConfigFresh() {
-  const current = loadConfig();
-  const fresh = defaultConfig();
-  fresh.teams = {};
-  fresh.roles = {};
-  fresh.channels.teamChats = {};
-  fresh.channels.staffRooms = {};
-  fresh.channels.privateChatCategories = {};
-  fresh.eventTypes = {
-    autoDetect: false,
-    practiceExactNames: [],
-    matchExactNames: [],
-    otherExactNames: [],
-    practiceKeywords: [],
-    matchKeywords: []
+  const current = loadRawConfig();
+  const fresh = {
+    _configBackups: pushConfigBackup(current, { reason: 'fresh_reset', changedPath: 'all' })
   };
-  fresh._configBackups = pushConfigBackup(current, { reason: 'fresh_reset', changedPath: 'all' });
-
   saveConfig(fresh);
-  return fresh;
+  return loadConfig();
 }
 
 module.exports = {

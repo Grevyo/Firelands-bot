@@ -1,7 +1,7 @@
 const { SlashCommandBuilder, MessageFlags } = require('discord.js');
-const { loadConfig, updateConfig } = require('../utils/config');
+const { loadConfig, updateConfig, saveConfig } = require('../utils/config');
 const { loadDb } = require('../utils/database');
-const { syncAllToSheet, syncConfigOnlyToSheet } = require('../utils/googleSheetsSync');
+const { syncAllToSheet, syncConfigOnlyToSheet, loadConfigFromSheet } = require('../utils/googleSheetsSync');
 const { hasAdminAccess, adminAccessMessage } = require('../utils/adminAccess');
 
 const FIELD_MAP = {
@@ -194,6 +194,8 @@ module.exports = {
 
       try {
         const result = await syncAllToSheet(latestConfig, db);
+        const sheetConfig = await loadConfigFromSheet(latestConfig).catch(() => null);
+        if (sheetConfig) saveConfig(sheetConfig);
         if (!result.ok) {
           await interaction.reply({
             content: 'Could not sync because spreadsheet ID is not configured.',

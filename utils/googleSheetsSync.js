@@ -195,24 +195,17 @@ async function loadConfigFromSheet(config = {}) {
 
   const sheets = await getSheetsClient(config);
   const configRange = normalizeA1Range(config.googleSync?.configRange, 'Config!A2:C');
-  const configIdsRange = normalizeA1Range(config.googleSync?.configIdsRange, 'Config IDs!A2:C');
-  const [configRowsResponse, configIdsRowsResponse] = await Promise.all([
-    sheets.spreadsheets.values.get({ spreadsheetId, range: configRange }).catch(() => ({ data: { values: [] } })),
-    sheets.spreadsheets.values.get({ spreadsheetId, range: configIdsRange }).catch(() => ({ data: { values: [] } }))
-  ]);
+  const configRowsResponse = await sheets.spreadsheets.values.get({ spreadsheetId, range: configRange }).catch(() => ({ data: { values: [] } }));
 
   const configRows = configRowsResponse.data.values || [];
   if (!configRows.length) return null;
-
-  const idRows = configIdsRowsResponse.data.values || [];
-  const idOverrides = new Map(idRows.map((row) => [row[0], row[1] || '']).filter(([key]) => key));
   const merged = JSON.parse(JSON.stringify(config || {}));
 
   for (const row of configRows) {
     const key = row[0];
     if (!key || key.startsWith('_')) continue;
     const template = getNestedValue(merged, key);
-    const rawValue = idOverrides.has(key) ? idOverrides.get(key) : (row[1] || '');
+    const rawValue = row[1] || '';
     setNestedValue(merged, key, parseConfigValue(rawValue, template));
   }
 
@@ -1043,7 +1036,6 @@ async function syncAllToSheet(config = {}, db = {}, options = {}) {
     : normalizeA1Range(config.googleSync?.commandLogRange, "'Command Logs'!A2:I");
   const attendanceRange = normalizeA1Range(config.googleSync?.attendanceRange, 'Attendance!A2:F');
   const configRange = normalizeA1Range(config.googleSync?.configRange, 'Config!A2:C');
-  const configIdsRange = normalizeA1Range(config.googleSync?.configIdsRange, 'Config IDs!A2:C');
   const configBackupsRange = normalizeA1Range(config.googleSync?.configBackupsRange, 'Config Backups!A2:F');
   const playersRange = options.setupFreshWipe
     ? 'Players and Coaches!A2:Q'
@@ -1086,7 +1078,6 @@ async function syncAllToSheet(config = {}, db = {}, options = {}) {
       ...teamFixtureSections,
       { range: attendanceRange, headers: ['eventId', 'userId', 'username', 'team', 'status', 'updatedAt'], description: 'Attendance responses by event.' },
       { range: configRange, headers: ['key', 'value', 'updatedAt'], description: 'Flattened runtime configuration.' },
-      { range: configIdsRange, headers: ['key', 'value', 'updatedAt'], description: 'Role / channel / team identifiers.' },
       { range: configBackupsRange, headers: ['backupOrder', 'timestamp', 'changedPath', 'reason', 'snapshotPreview', 'snapshot'], description: 'Last 5 config states before changes.' },
       { range: playersRange, headers: ['userIdPreview', 'customName', 'nickName', 'gender', 'shirtNumber', 'shirtNumbersByTeam', 'teams', 'coachTeams', 'coachPositionsByTeam', 'roles', 'joinedDiscordAt', 'notes', 'faceImageUrl', 'notesLog', 'updatedAt', 'userId', 'profileJson'], description: 'Player + coach management profiles, including team assignments, titles, and saved profile fields.' },
       { range: absencesRange, headers: ['ticketPreview', 'channelPreview', 'eventPreview', 'eventTitle', 'eventDate', 'eventLocation', 'team', 'playerPreview', 'playerName', 'attendanceStatus', 'reason', 'coachDecision', 'coachPreview', 'coachName', 'closedAt', 'createdAt', 'closedReason', 'ticketId', 'channelId', 'eventId', 'playerId', 'coachId'], description: 'Absence tickets and outcomes.' },
@@ -1116,7 +1107,6 @@ async function syncAllToSheet(config = {}, db = {}, options = {}) {
   await writeRange(sheets, spreadsheetId, attendanceRange, buildAttendanceRows(db), options);
   await writeRange(sheets, spreadsheetId, configRange, flattenConfig(config), options);
   if (!options.setupFreshWipe) {
-    await writeRange(sheets, spreadsheetId, configIdsRange, await buildMergedConfigIdRows(sheets, spreadsheetId, config, configIdsRange), options);
     await writeRange(sheets, spreadsheetId, configBackupsRange, buildConfigBackupRows(config), options);
   }
   await writeRange(sheets, spreadsheetId, playersRange, buildPlayerRows(db, config), options);
@@ -1192,13 +1182,11 @@ async function syncConfigOnlyToSheet(config = {}) {
 
   const sheets = await getSheetsClient(config);
   const configRange = config.googleSync?.configRange || 'Config!A2:C';
-  const configIdsRange = config.googleSync?.configIdsRange || 'Config IDs!A2:C';
   const configBackupsRange = config.googleSync?.configBackupsRange || 'Config Backups!A2:F';
 
   const sections = [
     { range: 'Home!A2:E', headers: ['Tab', 'Purpose', 'Open', 'Previous', 'Next'], description: 'Navigation hub for every tab.' },
     { range: configRange, headers: ['key', 'value', 'updatedAt'], description: 'Flattened runtime configuration.' },
-    { range: configIdsRange, headers: ['key', 'value', 'updatedAt'], description: 'Role / channel / team identifiers.' },
     { range: configBackupsRange, headers: ['backupOrder', 'timestamp', 'changedPath', 'reason', 'snapshotPreview', 'snapshot'], description: 'Last 5 config states before changes.' }
   ];
 
@@ -1206,7 +1194,6 @@ async function syncConfigOnlyToSheet(config = {}) {
   await writeTabNavigationRows(sheets, spreadsheetId, sections, sheetIdByTitle);
 
   await writeRange(sheets, spreadsheetId, configRange, await buildMergedConfigRows(sheets, spreadsheetId, config, configRange));
-  await writeRange(sheets, spreadsheetId, configIdsRange, await buildMergedConfigIdRows(sheets, spreadsheetId, config, configIdsRange));
   await writeRange(sheets, spreadsheetId, configBackupsRange, buildConfigBackupRows(config));
   await writeRange(sheets, spreadsheetId, 'Home!A2:E', buildHomeRows(sections.slice(1), sheetIdByTitle));
 

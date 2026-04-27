@@ -7,8 +7,8 @@ const {
   MessageFlags
 } = require('discord.js');
 const { loadDb } = require('../utils/database');
-const { loadConfig, updateConfig } = require('../utils/config');
-const { syncAllToSheet } = require('../utils/googleSheetsSync');
+const { loadConfig, updateConfig, saveConfig } = require('../utils/config');
+const { syncAllToSheet, loadConfigFromSheet } = require('../utils/googleSheetsSync');
 const { hasAdminAccess, adminAccessMessage } = require('../utils/adminAccess');
 
 function getSpreadsheetViewUrl(config = {}) {
@@ -133,6 +133,8 @@ async function handleSyncGoogle(interaction, spreadsheetInput = '') {
   const latestConfig = loadConfig();
   const db = loadDb();
   const result = await syncAllToSheet(latestConfig, db);
+  const sheetConfig = await loadConfigFromSheet(latestConfig).catch(() => null);
+  if (sheetConfig) saveConfig(sheetConfig);
 
   if (!result.ok) {
     await interaction.reply({
