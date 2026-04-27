@@ -597,9 +597,10 @@ async function handleSetupInteraction(interaction) {
         teamMatchers: {}
       });
       const sheets = await getSheetsClient(config);
+      const commandLogRange = String(config.googleSync?.commandLogRange || "'Command Logs'!A2:I").replace(/[\r\n]+/g, '').trim() || "'Command Logs'!A2:I";
       await sheets.spreadsheets.values.append({
         spreadsheetId,
-        range: config.googleSync?.commandLogRange || "'Command Logs'!A2:I",
+        range: commandLogRange,
         valueInputOption: 'RAW',
         insertDataOption: 'INSERT_ROWS',
         requestBody: { values: [[new Date().toISOString(), 'setup', 'connection_check', '', '', interaction.guildId || '', interaction.channelId || '', interaction.user?.id || '', interaction.user?.tag || 'setup']] }
