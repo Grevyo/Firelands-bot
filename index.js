@@ -273,6 +273,25 @@ function getConfig() {
   return loadConfig();
 }
 
+function parseCalendarId(input = '') {
+  const raw = String(input || '').trim();
+  if (!raw) return '';
+  if (!/^https?:\/\//i.test(raw)) return raw;
+
+  try {
+    const url = new URL(raw);
+    const cid = url.searchParams.get('cid');
+    if (cid) return decodeURIComponent(cid).trim();
+
+    const src = url.searchParams.get('src');
+    if (src) return decodeURIComponent(src).trim();
+  } catch (_) {
+    return raw;
+  }
+
+  return raw;
+}
+
 function getSetupDraft(guildId = '') {
   const db = loadDb();
   if (!guildId) {
@@ -527,7 +546,7 @@ async function handleSetupInteraction(interaction) {
       new ActionRowBuilder().addComponents(
         new TextInputBuilder()
           .setCustomId('calendar_id')
-          .setLabel('Google Calendar ID')
+          .setLabel('Google Calendar ID or URL')
           .setStyle(TextInputStyle.Short)
           .setRequired(true)
           .setValue(draft.calendarId || '')
@@ -580,7 +599,7 @@ async function handleSetupInteraction(interaction) {
       const sheets = await getSheetsClient(config);
       await sheets.spreadsheets.values.append({
         spreadsheetId,
-        range: config.googleSync?.commandLogRange || 'Command Log!A2:I',
+        range: config.googleSync?.commandLogRange || "'Command Logs'!A2:I",
         valueInputOption: 'RAW',
         insertDataOption: 'INSERT_ROWS',
         requestBody: { values: [[new Date().toISOString(), 'setup', 'connection_check', '', '', interaction.guildId || '', interaction.channelId || '', interaction.user?.id || '', interaction.user?.tag || 'setup']] }
@@ -601,7 +620,8 @@ async function handleSetupInteraction(interaction) {
     return true;
   }
   if (interaction.customId.startsWith('setup_set_calendar_id_modal') && interaction.isModalSubmit()) {
-    const calendarId = interaction.fields.getTextInputValue('calendar_id').trim();
+    const calendarInput = interaction.fields.getTextInputValue('calendar_id').trim();
+    const calendarId = parseCalendarId(calendarInput);
     saveSetupDraft({ calendarId }, interaction.guildId);
     const sourceMessageId = interaction.customId.split(':')[1] || '';
     const updated = await updateSetupMessageFromModal(interaction, sourceMessageId);

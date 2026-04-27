@@ -241,7 +241,7 @@ async function appendCommandLogRow(config = {}, entry = {}) {
   const spreadsheetId = getSpreadsheetId(config);
   if (!spreadsheetId) return false;
 
-  const range = config.googleSync?.commandLogRange || 'Command Log!A2:I';
+  const range = config.googleSync?.commandLogRange || "'Command Logs'!A2:I";
   const sheets = await getSheetsClient(config);
 
   await ensureSheetLayout(sheets, spreadsheetId, [
@@ -1029,7 +1029,7 @@ async function syncAllToSheet(config = {}, db = {}, options = {}) {
 
   const sheets = await getSheetsClient(config);
   const fixturesRange = options.setupFreshWipe ? 'Fixtures!A2:G' : (config.googleSync?.fixturesRange || 'Fixtures!A2:G');
-  const commandLogRange = options.setupFreshWipe ? 'Command Logs!A2:I' : (config.googleSync?.commandLogRange || 'Command Log!A2:I');
+  const commandLogRange = options.setupFreshWipe ? "'Command Logs'!A2:I" : (config.googleSync?.commandLogRange || "'Command Logs'!A2:I");
   const attendanceRange = config.googleSync?.attendanceRange || 'Attendance!A2:F';
   const configRange = config.googleSync?.configRange || 'Config!A2:C';
   const configIdsRange = config.googleSync?.configIdsRange || 'Config IDs!A2:C';
