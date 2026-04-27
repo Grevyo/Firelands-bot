@@ -243,13 +243,6 @@ async function updateSetupMessageFromModal(interaction, sourceMessageId) {
   return true;
 }
 
-function sanitizeGoogleRange(range = '', fallback = "'Command Logs'!A2:I") {
-  return String(range || '')
-    .replace(/\\[rn]/gi, '')
-    .replace(/[\r\n]+/g, '')
-    .trim() || String(fallback || '').trim();
-}
-
 function toA1SheetName(title = '') {
   const raw = String(title || '').trim();
   if (!raw) return 'Backups';
@@ -303,6 +296,16 @@ function progressBar(percent = 0, width = 20) {
   const safePercent = Math.min(100, Math.max(0, Number.isFinite(percent) ? Math.round(percent) : 0));
   const filled = Math.round((safePercent / 100) * width);
   return `[${'█'.repeat(filled)}${'░'.repeat(Math.max(0, width - filled))}] ${safePercent}%`;
+}
+
+function buildGoogleConnectionCheckProgress(percent = 0, step = '') {
+  const safeStep = String(step || '').trim() || 'Working…';
+  return [
+    '🔎 Checking Google Calendar read access and Google Sheets write access…',
+    '',
+    `Progress: **${progressBar(percent)}**`,
+    `Step: ${safeStep}`
+  ].join('\n');
 }
 
 function buildSetupRestoreProgressText(slot, progressState, done = false) {
@@ -454,6 +457,60 @@ async function sendLog(message, fallbackChannelId = '') {
     }
   } catch (error) {
     console.error('Failed to write logs channel message:', error.message);
+  }
+}
+
+function buildSetupErrorReport(error, interaction, stage = 'setup') {
+  const now = new Date().toISOString();
+  const config = getConfig();
+  const draft = getSetupDraft(interaction?.guildId);
+  return [
+    `timestamp: ${now}`,
+    `stage: ${stage}`,
+    `message: ${String(error?.message || error || 'Unknown error')}`,
+    `stack:`,
+    String(error?.stack || '(no stack available)'),
+    '',
+    'interaction:',
+    `  customId: ${interaction?.customId || ''}`,
+    `  userId: ${interaction?.user?.id || ''}`,
+    `  userTag: ${interaction?.user?.tag || ''}`,
+    `  guildId: ${interaction?.guildId || ''}`,
+    `  channelId: ${interaction?.channelId || ''}`,
+    '',
+    'google_setup:',
+    `  calendarId: ${draft?.calendarId || config.bot?.calendarId || ''}`,
+    `  spreadsheetId: ${draft?.spreadsheetId || config.googleSync?.spreadsheetId || ''}`,
+    '',
+    'hint:',
+    'Share this file and the visible error message in Codex for debugging.'
+  ].join('\n');
+}
+
+async function sendSetupErrorReport(interaction, error, stage = 'setup') {
+  const reportText = buildSetupErrorReport(error, interaction, stage);
+  const fileName = `setup-error-${Date.now()}.log`;
+  const summary = `🧾 Setup error report generated for **${stage}**.\nError: \`${String(error?.message || error || 'Unknown error')}\``;
+  const payload = {
+    content: `${summary}\nPlease upload this log file to Codex for troubleshooting.`,
+    files: [{ attachment: Buffer.from(reportText, 'utf8'), name: fileName }]
+  };
+
+  const interactionChannelId = interaction?.channelId || '';
+  if (interaction?.channel?.isTextBased?.()) {
+    await interaction.channel.send(payload).catch(() => null);
+  }
+
+  const config = getConfig();
+  const logsChannelId = config.channels.admin || config.channels.logs || interaction?.channelId || '';
+  if (!logsChannelId) return;
+  try {
+    const logsChannel = await client.channels.fetch(logsChannelId);
+    if (logsChannel && logsChannel.isTextBased() && logsChannel.id !== interactionChannelId) {
+      await logsChannel.send(payload);
+    }
+  } catch (sendError) {
+    console.error('Failed to send setup error report:', sendError.message);
   }
 }
 
@@ -625,7 +682,7 @@ async function handleSetupInteraction(interaction) {
   }
   if (interaction.customId === 'setup_validate_google' && interaction.isButton()) {
     await interaction.update({
-      content: '🔎 Checking Google Calendar read access and Google Sheets write access...\nPlease wait.',
+      content: buildGoogleConnectionCheckProgress(0, 'Starting checks'),
       components: []
     }).catch(() => null);
 
@@ -642,25 +699,74 @@ async function handleSetupInteraction(interaction) {
     }
 
     try {
+      const updateCheckProgress = async (percent, step) => {
+        await interaction.message?.edit({
+          content: buildGoogleConnectionCheckProgress(percent, step),
+          components: []
+        }).catch(() => null);
+      };
+
+      await updateCheckProgress(20, 'Reading Google Calendar');
       await fetchCalendarEvents({
         calendarId,
         daysAhead: 7,
         credentialsPath: config.bot?.calendarCredentialsPath || '',
         teamMatchers: {}
       });
+
       const sheets = await getSheetsClient(config);
-      const commandLogRange = sanitizeGoogleRange(config.googleSync?.commandLogRange, "'Command Logs'!A2:I");
-      await sheets.spreadsheets.values.append({
+      const testSheetTitle = `Firelands Test ${Date.now()}`;
+      let testSheetId = null;
+
+      await updateCheckProgress(40, `Creating temporary tab "${testSheetTitle}"`);
+      const addSheetResponse = await sheets.spreadsheets.batchUpdate({
         spreadsheetId,
-        range: commandLogRange,
-        valueInputOption: 'RAW',
-        insertDataOption: 'INSERT_ROWS',
-        requestBody: { values: [[new Date().toISOString(), 'setup', 'connection_check', '', '', interaction.guildId || '', interaction.channelId || '', interaction.user?.id || '', interaction.user?.tag || 'setup']] }
+        requestBody: {
+          requests: [
+            {
+              addSheet: {
+                properties: { title: testSheetTitle }
+              }
+            }
+          ]
+        }
       });
+      testSheetId = addSheetResponse.data.replies?.[0]?.addSheet?.properties?.sheetId ?? null;
+
+      try {
+        await updateCheckProgress(60, `Writing test row to "${testSheetTitle}"`);
+        await sheets.spreadsheets.values.append({
+          spreadsheetId,
+          range: `${toA1SheetName(testSheetTitle)}!A1:B`,
+          valueInputOption: 'RAW',
+          insertDataOption: 'INSERT_ROWS',
+          requestBody: { values: [[new Date().toISOString(), 'connection_check_ok']] }
+        });
+      } finally {
+        if (Number.isInteger(testSheetId)) {
+          await updateCheckProgress(80, `Deleting temporary tab "${testSheetTitle}"`);
+          await sheets.spreadsheets.batchUpdate({
+            spreadsheetId,
+            requestBody: {
+              requests: [
+                {
+                  deleteSheet: {
+                    sheetId: testSheetId
+                  }
+                }
+              ]
+            }
+          }).catch(() => null);
+        }
+      }
+
+      await updateCheckProgress(90, 'Checking Backups availability');
       const sheetState = await inspectSetupSheetState(config).catch(() => null);
       const backupsTabAvailable = Boolean(sheetState?.hasBackupsTab);
       const hasBackupSnapshots = Boolean(sheetState?.hasBackupSnapshots);
       const missingTabs = Array.isArray(sheetState?.missingRequiredTabs) ? sheetState.missingRequiredTabs : [];
+
+      await updateCheckProgress(100, 'Checks complete');
       await interaction.message?.edit({
         content: hasBackupSnapshots
           ? '✅ Calendar read + Sheet write checks passed.\n✅ Found backup snapshot(s) in **Backups**.\nChoose whether to restore a backup or start fresh.'
@@ -677,6 +783,7 @@ async function handleSetupInteraction(interaction) {
         components: createSetupModeRowsWithBackup(hasBackupSnapshots)
       }).catch(() => null);
     } catch (error) {
+      await sendSetupErrorReport(interaction, error, 'setup_validate_google');
       await interaction.message?.edit({
         content: `❌ Google connection check failed: ${error.message}\n\nPlease recheck your Calendar ID and Sheet URL/ID, and make sure the sheet is shared as Editor with the service account email shown above.`,
         components: createSetupRows()
@@ -771,6 +878,7 @@ async function handleSetupInteraction(interaction) {
         await interaction.message?.edit({ content: 'Unknown setup action selected.', components: createSetupRows() }).catch(() => null);
       }
     } catch (error) {
+      await sendSetupErrorReport(interaction, error, 'setup_sheet_mode');
       await interaction.message?.edit({ content: `❌ Setup sheet action failed: ${error.message}`, components: createSetupRows() }).catch(() => null);
     }
 
@@ -811,6 +919,7 @@ async function handleSetupInteraction(interaction) {
         components: createSetupFinishRow()
       }).catch(() => null);
     } catch (error) {
+      await sendSetupErrorReport(interaction, error, 'setup_restore_slot');
       await interaction.message?.edit({ content: `❌ Failed to restore slot ${slot}: ${error.message}`, components: createSetupRows() }).catch(() => null);
     }
     return true;
@@ -833,6 +942,7 @@ async function handleSetupInteraction(interaction) {
         components: createSetupFinishRow()
       }).catch(() => null);
     } catch (error) {
+      await sendSetupErrorReport(interaction, error, 'setup_fresh_sync');
       await interaction.message?.edit({ content: `❌ Fixture sync failed: ${error.message}`, components: createSetupFinishRow() }).catch(() => null);
     }
     return true;
