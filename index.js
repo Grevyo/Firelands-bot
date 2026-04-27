@@ -149,15 +149,21 @@ function createSetupRows() {
 }
 
 function createSetupModeRows() {
+  return createSetupModeRowsWithBackup(true);
+}
+
+function createSetupModeRowsWithBackup(includeBackup = true) {
+  const options = [
+    { label: 'Fresh Config + Empty Sheets', value: 'fresh_config' }
+  ];
+  if (includeBackup) options.push({ label: 'Load Backup Slot', value: 'load_backup' });
+
   return [
     new ActionRowBuilder().addComponents(
       new StringSelectMenuBuilder()
         .setCustomId('setup_sheet_mode')
         .setPlaceholder('Choose initialization action')
-        .addOptions([
-          { label: 'Fresh Config + Empty Sheets', value: 'fresh_config' },
-          { label: 'Load Backup Slot', value: 'load_backup' }
-        ])
+        .addOptions(options)
     ),
     new ActionRowBuilder().addComponents(
       new ButtonBuilder()
@@ -232,6 +238,14 @@ async function updateSetupMessageFromModal(interaction, sourceMessageId) {
     components: createSetupRows()
   }).catch(() => null);
   return true;
+}
+
+async function hasBackupsTab(config) {
+  const spreadsheetId = getSpreadsheetId(config);
+  if (!spreadsheetId) return false;
+  const sheets = await getSheetsClient(config);
+  const metadata = await sheets.spreadsheets.get({ spreadsheetId });
+  return (metadata.data.sheets || []).some((sheet) => String(sheet.properties?.title || '').trim().toLowerCase() === 'backups');
 }
 
 function progressBar(percent = 0, width = 20) {
@@ -571,9 +585,12 @@ async function handleSetupInteraction(interaction) {
         insertDataOption: 'INSERT_ROWS',
         requestBody: { values: [[new Date().toISOString(), 'setup', 'connection_check', '', '', interaction.guildId || '', interaction.channelId || '', interaction.user?.id || '', interaction.user?.tag || 'setup']] }
       });
+      const backupsTabAvailable = await hasBackupsTab(config).catch(() => false);
       await interaction.message?.edit({
-        content: '✅ Calendar read + Sheet write checks passed.\nNow choose initialization mode.',
-        components: createSetupModeRows()
+        content: backupsTabAvailable
+          ? '✅ Calendar read + Sheet write checks passed.\nNow choose initialization mode.'
+          : '✅ Calendar read + Sheet write checks passed.\n⚠️ Could not load backups because no **Backups** tab was found in the Google Sheet.\nYou can continue with **Fresh Config + Empty Sheets**.',
+        components: createSetupModeRowsWithBackup(backupsTabAvailable)
       }).catch(() => null);
     } catch (error) {
       await interaction.message?.edit({
@@ -628,6 +645,14 @@ async function handleSetupInteraction(interaction) {
           : { content: 'Could not sync because spreadsheet ID is not configured.', components: createSetupRows() }).catch(() => null);
         return true;
       } else if (interaction.values[0] === 'load_backup') {
+        const backupsTabAvailable = await hasBackupsTab(config).catch(() => false);
+        if (!backupsTabAvailable) {
+          await interaction.message?.edit({
+            content: '⚠️ Could not load a backup because no **Backups** tab was found in the connected Google Sheet.\nPlease use **Fresh Config + Empty Sheets**.',
+            components: createSetupModeRowsWithBackup(false)
+          }).catch(() => null);
+          return true;
+        }
         const backups = (await loadSheetBackups(config).catch(() => [])).sort((a, b) => a.slot - b.slot);
         await interaction.message?.edit({
           content: 'Pick a backup slot to restore. You can press **Back** to choose Fresh Config instead.',
