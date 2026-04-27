@@ -1252,9 +1252,9 @@ function buildPlayerProfileSummary(config, guild, user, member, profile = {}, mo
   const primaryCoachTeam = coachingTeams[0];
   const coachTitle = primaryCoachTeam ? getCoachPositionLabel(getCoachPositionForTeam(profile, primaryCoachTeam, config), config) : getCoachPositionLabel(getDefaultCoachRoleId(config), config);
   const managerLabel = (mode === 'coach' && playingTeams.length)
-    ? `Managing "Player/${coachTitle}" ${displayName}`
+    ? `Managing Player/${coachTitle} ${displayName}`
     : mode === 'coach'
-      ? `Managing "${coachTitle}" ${displayName}`
+      ? `Managing ${coachTitle} ${displayName}`
       : `Managing player ${displayName}`;
   const attendanceSummary = buildAttendanceStatsMessage(user?.id || profile.userId, config).split('\n').slice(1).join('\n');
   const absenceLines = buildDetailedAttendanceMessage(user?.id || profile.userId, config, 'all')
