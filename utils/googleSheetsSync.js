@@ -61,11 +61,25 @@ function normalizeA1Range(range = '', fallback = '') {
     .replace(/\\[rn]/gi, '')
     .replace(/[\r\n]+/g, '')
     .trim();
-  return cleaned || String(fallback || '').trim();
+  const effective = cleaned || String(fallback || '').trim();
+  if (!effective.includes('!')) return effective;
+
+  const [rawTitle, rest] = effective.split(/!(.+)/);
+  const title = getSheetNameFromRange(rawTitle);
+  return `${toA1SheetName(title)}!${rest}`;
 }
 
 function getSheetNameFromRange(range = '') {
-  return String(range).split('!')[0].trim();
+  const rawTitle = String(range).split('!')[0].trim();
+  if (rawTitle.startsWith("'") && rawTitle.endsWith("'") && rawTitle.length >= 2) {
+    return rawTitle.slice(1, -1).replace(/''/g, "'");
+  }
+  return rawTitle;
+}
+
+function toA1SheetName(title = '') {
+  const escaped = String(title || '').replace(/'/g, "''");
+  return `'${escaped}'`;
 }
 
 function sanitizeSheetTitle(value = '') {
@@ -643,7 +657,7 @@ async function ensureSheetLayout(sheets, spreadsheetId, sections = []) {
     const startRow = Math.max(1, getRangeStartRow(section.range) - 1);
     const endColumn = toColumnLabel(headers.length);
     return {
-      range: `${title}!A${startRow}:${endColumn}${startRow}`,
+      range: `${toA1SheetName(title)}!A${startRow}:${endColumn}${startRow}`,
       majorDimension: 'ROWS',
       values: [headers]
     };
@@ -751,7 +765,7 @@ async function writeTabNavigationRows(sheets, spreadsheetId, sections = [], shee
     const endCol = toColumnLabel(headerCount + 4);
 
     return {
-      range: `${title}!${startCol}1:${endCol}1`,
+      range: `${toA1SheetName(title)}!${startCol}1:${endCol}1`,
       majorDimension: 'ROWS',
       values: [[
         homeGid ? `=HYPERLINK("#gid=${homeGid}", "🏠 Home")` : 'Home',
@@ -815,7 +829,7 @@ async function loadSheetBackups(config = {}) {
     { range: backupsRange, headers: ['slot', 'name', 'createdAt', 'createdBy', 'summary', 'snapshot'] }
   ]);
 
-  const response = await sheets.spreadsheets.values.get({ spreadsheetId, range: `${title}!A2:ZZ` }).catch(() => ({ data: { values: [] } }));
+  const response = await sheets.spreadsheets.values.get({ spreadsheetId, range: `${toA1SheetName(title)}!A2:ZZ` }).catch(() => ({ data: { values: [] } }));
   const rows = response.data.values || [];
   return rows
     .map((row) => ({
@@ -848,12 +862,12 @@ async function saveSheetBackupSlot(config = {}, { slot = 1, name = '', createdBy
 
   await sheets.spreadsheets.values.clear({
     spreadsheetId,
-    range: `${title}!A${row + 1}:ZZ${row + 1}`
+    range: `${toA1SheetName(title)}!A${row + 1}:ZZ${row + 1}`
   });
 
   await sheets.spreadsheets.values.update({
     spreadsheetId,
-    range: `${title}!A${row + 1}:${endCol}${row + 1}`,
+    range: `${toA1SheetName(title)}!A${row + 1}:${endCol}${row + 1}`,
     valueInputOption: 'RAW',
     requestBody: {
       values: [rowValues]
