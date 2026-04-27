@@ -430,8 +430,7 @@ async function registerSlashCommands() {
     await rest.put(Routes.applicationCommands(clientId), {
       body: [
         playerCommand.data.toJSON(),
-        coachCommand.data.toJSON(),
-        adminCommand.data.toJSON()
+        coachCommand.data.toJSON()
       ]
     });
     console.log('Slash commands registered.');
@@ -661,6 +660,8 @@ async function handleSetupInteraction(interaction) {
         const freshConfig = getConfig();
         applySetupDraftToConfig(setupDraft);
         const result = await syncAllToSheet(freshConfig, loadDb(), { wipe: true, setupFreshWipe: true });
+        const sheetConfig = await loadConfigFromSheet(getConfig()).catch(() => null);
+        if (sheetConfig) saveConfig(sheetConfig);
         await interaction.message?.edit(result.ok
           ? { content: `✅ Fresh config completed and sheet tabs rebuilt (\`${result.spreadsheetId}\`).\n\nWould you like to sync fixtures from Google Calendar now for the first time?`, components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('setup_fresh_sync_yes').setLabel('Yes, sync fixtures now').setStyle(ButtonStyle.Success), new ButtonBuilder().setCustomId('setup_fresh_sync_no').setLabel('No, finish setup').setStyle(ButtonStyle.Secondary))] }
           : { content: 'Could not sync because spreadsheet ID is not configured.', components: createSetupRows() }).catch(() => null);
@@ -739,6 +740,8 @@ async function handleSetupInteraction(interaction) {
     await interaction.update({ content: `${progressBar(15)} Syncing fixtures from Google Calendar...`, components: [] }).catch(() => null);
     try {
       await syncCalendarEvents();
+      const sheetConfig = await loadConfigFromSheet(getConfig()).catch(() => null);
+      if (sheetConfig) saveConfig(sheetConfig);
       await interaction.message?.edit({
         content: `${progressBar(100)} ✅ Fixture sync completed.\nFirelands Bot setup is complete and ready to use. Delete this message to finish setup.`,
         components: createSetupFinishRow()
