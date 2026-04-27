@@ -220,6 +220,19 @@ function createSetupBackupRows(backups = []) {
   return [backupPickerRow, backRow];
 }
 
+async function updateSetupMessageFromModal(interaction, sourceMessageId) {
+  if (!sourceMessageId) return false;
+  const channel = interaction.channel;
+  if (!channel?.isTextBased()) return false;
+  const targetMessage = await channel.messages.fetch(sourceMessageId).catch(() => null);
+  if (!targetMessage) return false;
+  await targetMessage.edit({
+    content: buildSetupSummary(getConfig()),
+    components: createSetupRows()
+  }).catch(() => null);
+  return true;
+}
+
 function progressBar(percent = 0, width = 20) {
   const safePercent = Math.min(100, Math.max(0, Number.isFinite(percent) ? Math.round(percent) : 0));
   const filled = Math.round((safePercent / 100) * width);
@@ -450,7 +463,7 @@ async function handleSetupInteraction(interaction) {
     return true;
   }
   if (interaction.customId === 'setup_set_calendar_id' && interaction.isButton()) {
-    const modal = new ModalBuilder().setCustomId('setup_set_calendar_id_modal').setTitle('Set Google Calendar ID');
+    const modal = new ModalBuilder().setCustomId(`setup_set_calendar_id_modal:${interaction.message?.id || ''}`).setTitle('Set Google Calendar ID');
     modal.addComponents(
       new ActionRowBuilder().addComponents(
         new TextInputBuilder()
@@ -465,7 +478,7 @@ async function handleSetupInteraction(interaction) {
     return true;
   }
   if (interaction.customId === 'setup_set_sheet_url' && interaction.isButton()) {
-    const modal = new ModalBuilder().setCustomId('setup_set_sheet_url_modal').setTitle('Set Google Sheet URL');
+    const modal = new ModalBuilder().setCustomId(`setup_set_sheet_url_modal:${interaction.message?.id || ''}`).setTitle('Set Google Sheet URL');
     modal.addComponents(
       new ActionRowBuilder().addComponents(
         new TextInputBuilder()
@@ -490,7 +503,7 @@ async function handleSetupInteraction(interaction) {
     const spreadsheetId = getSpreadsheetId(config);
     if (!calendarId || !spreadsheetId) {
       await interaction.message?.edit({
-        content: `❌ Missing Google details.\nCalendar ID: \`${calendarId || 'not set'}\`\nSheet ID: \`${spreadsheetId || 'not set'}\`\n\nSet both values, then check again.`,
+        content: `❌ Missing Google details.\nCalendar ID: \`${calendarId || 'not set'}\`\nSheet ID: \`${spreadsheetId || 'not set'}\`\n\nPlease recheck your Calendar ID and Sheet URL/ID, then click **Check Google connections** again.`,
         components: createSetupRows()
       }).catch(() => null);
       return true;
@@ -517,27 +530,35 @@ async function handleSetupInteraction(interaction) {
       }).catch(() => null);
     } catch (error) {
       await interaction.message?.edit({
-        content: `❌ Google connection check failed: ${error.message}\n\nMake sure the calendar exists and the sheet is shared as Editor with the service account email shown above.`,
+        content: `❌ Google connection check failed: ${error.message}\n\nPlease recheck your Calendar ID and Sheet URL/ID, and make sure the sheet is shared as Editor with the service account email shown above.`,
         components: createSetupRows()
       }).catch(() => null);
     }
     return true;
   }
-  if (interaction.customId === 'setup_set_calendar_id_modal' && interaction.isModalSubmit()) {
+  if (interaction.customId.startsWith('setup_set_calendar_id_modal') && interaction.isModalSubmit()) {
     const calendarId = interaction.fields.getTextInputValue('calendar_id').trim();
     updateConfig('bot.calendarId', calendarId);
+    const sourceMessageId = interaction.customId.split(':')[1] || '';
+    const updated = await updateSetupMessageFromModal(interaction, sourceMessageId);
     await interaction.reply({
-      content: buildSetupSummary(getConfig()),
-      components: createSetupRows()
+      content: updated
+        ? '✅ Google Calendar ID saved. Setup wizard updated in-place.'
+        : buildSetupSummary(getConfig()),
+      ...(updated ? { flags: MessageFlags.Ephemeral } : { components: createSetupRows() })
     }).catch(() => null);
     return true;
   }
-  if (interaction.customId === 'setup_set_sheet_url_modal' && interaction.isModalSubmit()) {
+  if (interaction.customId.startsWith('setup_set_sheet_url_modal') && interaction.isModalSubmit()) {
     const input = interaction.fields.getTextInputValue('sheet_input').trim();
     updateConfig('googleSync.spreadsheetId', input);
+    const sourceMessageId = interaction.customId.split(':')[1] || '';
+    const updated = await updateSetupMessageFromModal(interaction, sourceMessageId);
     await interaction.reply({
-      content: buildSetupSummary(getConfig()),
-      components: createSetupRows()
+      content: updated
+        ? '✅ Google Sheet URL/ID saved. Setup wizard updated in-place.'
+        : buildSetupSummary(getConfig()),
+      ...(updated ? { flags: MessageFlags.Ephemeral } : { components: createSetupRows() })
     }).catch(() => null);
     return true;
   }

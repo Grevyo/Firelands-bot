@@ -1495,6 +1495,20 @@ async function triggerGoogleSync(context) {
   }
 }
 
+async function notifyCoachAndAdminOnAttending(interaction, context, event, attendanceName, responderType) {
+  await context.sendLog(`🟢 ${attendanceName} marked attending for **${event.title}** (${getEventDateLabel(event.date)}).`);
+  if (responderType !== 'player') return;
+
+  const config = loadConfig();
+  const coachChannelId = config.channels?.staffRooms?.[event.team];
+  if (!coachChannelId) return;
+  const coachChannel = await interaction.guild?.channels?.fetch(coachChannelId).catch(() => null);
+  if (!coachChannel?.isTextBased()) return;
+  await coachChannel.send(
+    `🟢 ${attendanceName} marked attending for **${event.title}** (${getEventDateLabel(event.date)}).`
+  ).catch(() => null);
+}
+
 async function logAdminUiAction(interaction, command, subcommand = '', options = {}) {
   try {
     const config = loadConfig();
@@ -2695,7 +2709,7 @@ module.exports = {
         const attendanceName = getPlayerDisplayName(interaction.user.id, interaction.user.tag);
         await interaction.reply({ content: '✅ You are marked as attending.', flags: MessageFlags.Ephemeral });
         await triggerGoogleSync(context);
-        await context.sendLog(`🟢 ${attendanceName} marked attending for **${event.title}** (${getEventDateLabel(event.date)}).`);
+        await notifyCoachAndAdminOnAttending(interaction, context, event, attendanceName, responderType);
         return;
       }
 
