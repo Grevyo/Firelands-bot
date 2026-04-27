@@ -252,28 +252,11 @@ function restoreConfigFromBackup(index = 0) {
 function resetConfigFresh() {
   const current = loadConfig();
   const fresh = defaultConfig();
-  const allTeams = new Set([
-    ...Object.keys(current.teams || {}),
-    ...Object.keys(current.roles || {}),
-    ...Object.keys(current.channels?.teamChats || {}),
-    ...Object.keys(current.channels?.staffRooms || {}),
-    ...Object.keys(current.channels?.privateChatCategories || {})
-  ]);
-
-  fresh.teams = Object.fromEntries(
-    [...allTeams].map((team) => [team, {
-      emoji: '',
-      label: '',
-      gender: '',
-      captainRoleId: '',
-      captainEmoji: '',
-      eventNamePhrases: []
-    }])
-  );
-  fresh.roles = Object.fromEntries([...allTeams].map((team) => [team, { player: '', coach: '' }]));
-  fresh.channels.teamChats = Object.fromEntries([...allTeams].map((team) => [team, '']));
-  fresh.channels.staffRooms = Object.fromEntries([...allTeams].map((team) => [team, '']));
-  fresh.channels.privateChatCategories = Object.fromEntries([...allTeams].map((team) => [team, '']));
+  fresh.teams = {};
+  fresh.roles = {};
+  fresh.channels.teamChats = {};
+  fresh.channels.staffRooms = {};
+  fresh.channels.privateChatCategories = {};
   fresh.eventTypes = {
     autoDetect: false,
     practiceExactNames: [],

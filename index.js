@@ -7,6 +7,9 @@ const {
   ButtonBuilder,
   ButtonStyle,
   StringSelectMenuBuilder,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
   RoleSelectMenuBuilder,
   ChannelSelectMenuBuilder,
   ChannelType,
@@ -32,9 +35,12 @@ const {
   appendCommandLogRow,
   loadSheetBackups,
   restoreSpreadsheetFromBackupSnapshot,
-  loadConfigFromSheet
+  loadConfigFromSheet,
+  getSpreadsheetId,
+  getSheetsClient
 } = require('./utils/googleSheetsSync');
 const { getTeamSetupProgress, getIncompleteTeamsForMember, buildIncompleteTeamMessage } = require('./utils/teamSetup');
+const { fetchCalendarEvents } = require('./utils/googleCalendar');
 
 ensureConfig();
 
@@ -84,15 +90,22 @@ function buildSetupWelcome() {
 function buildSetupSummary(config) {
   const adminRole = config.bot?.adminRoleId ? `<@&${config.bot.adminRoleId}>` : 'not set';
   const adminChannel = config.channels?.admin ? `<#${config.channels.admin}>` : 'not set';
+  const calendarId = config.bot?.calendarId || 'not set';
+  const spreadsheetId = getSpreadsheetId(config) || 'not set';
+  const serviceAccountEmail = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || 'firelands-bot-sync@firelands-bot-494321.iam.gserviceaccount.com';
   return [
     '⚙️ **Firelands Setup Wizard**',
-    'Choose /admin access role and admin logs channel below.',
+    'Choose /admin access role and admin logs channel below, then configure Google Calendar + Google Sheet.',
     'Player and coach command access is automatically derived from team player/coach roles.',
     '',
     `• /admin access role: ${adminRole}`,
     `• Admin logs channel: ${adminChannel}`,
+    `• Google Calendar ID: \`${calendarId}\``,
+    `• Google Sheet ID: \`${spreadsheetId}\``,
+    `• Share your Google Sheet as **Editor** with: \`${serviceAccountEmail}\``,
     '',
-    'Then choose initialization mode (this final step will complete and remove this wizard message):',
+    'Click **Check Google connections** to verify the bot can read the calendar and write to the sheet.',
+    'After checks pass, choose initialization mode:',
     '• **Fresh Config + Empty Sheets** = wipe data, rebuild all tabs with headings only.',
     '• **Load Backup Slot** = restore every synced tab from one saved backup line in the Backups sheet (max 5 slots).'
   ].join('\n');
@@ -116,13 +129,40 @@ function createSetupRows() {
         .setMaxValues(1)
     ),
     new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId('setup_set_calendar_id')
+        .setLabel('🗓️ Set Google Calendar ID')
+        .setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder()
+        .setCustomId('setup_set_sheet_url')
+        .setLabel('📄 Set Google Sheet URL')
+        .setStyle(ButtonStyle.Secondary)
+    ),
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId('setup_validate_google')
+        .setLabel('🔎 Check Google connections')
+        .setStyle(ButtonStyle.Primary)
+    )
+  ];
+}
+
+function createSetupModeRows() {
+  return [
+    new ActionRowBuilder().addComponents(
       new StringSelectMenuBuilder()
         .setCustomId('setup_sheet_mode')
-        .setPlaceholder('Choose setup action')
+        .setPlaceholder('Choose initialization action')
         .addOptions([
           { label: 'Fresh Config + Empty Sheets', value: 'fresh_config' },
           { label: 'Load Backup Slot', value: 'load_backup' }
         ])
+    ),
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId('setup_back_to_mode')
+        .setLabel('Back')
+        .setStyle(ButtonStyle.Secondary)
     )
   ];
 }
@@ -381,7 +421,7 @@ async function finalizeSetupWizard(interaction) {
 }
 
 async function handleSetupInteraction(interaction) {
-  if (!interaction.isButton() && !interaction.isStringSelectMenu() && !interaction.isRoleSelectMenu() && !interaction.isChannelSelectMenu()) return false;
+  if (!interaction.isButton() && !interaction.isStringSelectMenu() && !interaction.isRoleSelectMenu() && !interaction.isChannelSelectMenu() && !interaction.isModalSubmit()) return false;
   if (!String(interaction.customId || '').startsWith('setup_')) return false;
 
   if (interaction.customId === 'setup_get_started' && interaction.isButton()) {
@@ -409,6 +449,98 @@ async function handleSetupInteraction(interaction) {
     }).catch(() => null);
     return true;
   }
+  if (interaction.customId === 'setup_set_calendar_id' && interaction.isButton()) {
+    const modal = new ModalBuilder().setCustomId('setup_set_calendar_id_modal').setTitle('Set Google Calendar ID');
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('calendar_id')
+          .setLabel('Google Calendar ID')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+          .setValue(getConfig().bot?.calendarId || '')
+      )
+    );
+    await interaction.showModal(modal).catch(() => null);
+    return true;
+  }
+  if (interaction.customId === 'setup_set_sheet_url' && interaction.isButton()) {
+    const modal = new ModalBuilder().setCustomId('setup_set_sheet_url_modal').setTitle('Set Google Sheet URL');
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('sheet_input')
+          .setLabel('Google Sheet URL or Spreadsheet ID')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+          .setValue(getConfig().googleSync?.spreadsheetId || '')
+      )
+    );
+    await interaction.showModal(modal).catch(() => null);
+    return true;
+  }
+  if (interaction.customId === 'setup_validate_google' && interaction.isButton()) {
+    await interaction.update({
+      content: '🔎 Checking Google Calendar read access and Google Sheets write access...\nPlease wait.',
+      components: []
+    }).catch(() => null);
+
+    const config = getConfig();
+    const calendarId = config.bot?.calendarId || '';
+    const spreadsheetId = getSpreadsheetId(config);
+    if (!calendarId || !spreadsheetId) {
+      await interaction.message?.edit({
+        content: `❌ Missing Google details.\nCalendar ID: \`${calendarId || 'not set'}\`\nSheet ID: \`${spreadsheetId || 'not set'}\`\n\nSet both values, then check again.`,
+        components: createSetupRows()
+      }).catch(() => null);
+      return true;
+    }
+
+    try {
+      await fetchCalendarEvents({
+        calendarId,
+        daysAhead: 7,
+        credentialsPath: config.bot?.calendarCredentialsPath || '',
+        teamMatchers: {}
+      });
+      const sheets = await getSheetsClient(config);
+      await sheets.spreadsheets.values.append({
+        spreadsheetId,
+        range: config.googleSync?.commandLogRange || 'Command Log!A2:I',
+        valueInputOption: 'RAW',
+        insertDataOption: 'INSERT_ROWS',
+        requestBody: { values: [[new Date().toISOString(), 'setup', 'connection_check', '', '', interaction.guildId || '', interaction.channelId || '', interaction.user?.id || '', interaction.user?.tag || 'setup']] }
+      });
+      await interaction.message?.edit({
+        content: '✅ Calendar read + Sheet write checks passed.\nNow choose initialization mode.',
+        components: createSetupModeRows()
+      }).catch(() => null);
+    } catch (error) {
+      await interaction.message?.edit({
+        content: `❌ Google connection check failed: ${error.message}\n\nMake sure the calendar exists and the sheet is shared as Editor with the service account email shown above.`,
+        components: createSetupRows()
+      }).catch(() => null);
+    }
+    return true;
+  }
+  if (interaction.customId === 'setup_set_calendar_id_modal' && interaction.isModalSubmit()) {
+    const calendarId = interaction.fields.getTextInputValue('calendar_id').trim();
+    updateConfig('bot.calendarId', calendarId);
+    await interaction.reply({
+      content: buildSetupSummary(getConfig()),
+      components: createSetupRows()
+    }).catch(() => null);
+    return true;
+  }
+  if (interaction.customId === 'setup_set_sheet_url_modal' && interaction.isModalSubmit()) {
+    const input = interaction.fields.getTextInputValue('sheet_input').trim();
+    updateConfig('googleSync.spreadsheetId', input);
+    await interaction.reply({
+      content: buildSetupSummary(getConfig()),
+      components: createSetupRows()
+    }).catch(() => null);
+    return true;
+  }
 
   if (interaction.customId === 'setup_sheet_mode') {
     await interaction.deferUpdate().catch(() => null);
@@ -421,7 +553,7 @@ async function handleSetupInteraction(interaction) {
         const freshConfig = getConfig();
         const result = await syncAllToSheet(freshConfig, loadDb(), { wipe: true });
         await interaction.message?.edit(result.ok
-          ? { content: `✅ Fresh config completed and sheet tabs rebuilt (\`${result.spreadsheetId}\`).\nFirelands Bot setup is complete and ready to use. Delete this message to finish setup.`, components: createSetupFinishRow() }
+          ? { content: `✅ Fresh config completed and sheet tabs rebuilt (\`${result.spreadsheetId}\`).\n\nWould you like to sync fixtures from Google Calendar now for the first time?`, components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('setup_fresh_sync_yes').setLabel('Yes, sync fixtures now').setStyle(ButtonStyle.Success), new ButtonBuilder().setCustomId('setup_fresh_sync_no').setLabel('No, finish setup').setStyle(ButtonStyle.Secondary))] }
           : { content: 'Could not sync because spreadsheet ID is not configured.', components: createSetupRows() }).catch(() => null);
         return true;
       } else if (interaction.values[0] === 'load_backup') {
@@ -476,6 +608,26 @@ async function handleSetupInteraction(interaction) {
       }).catch(() => null);
     } catch (error) {
       await interaction.message?.edit({ content: `❌ Failed to restore slot ${slot}: ${error.message}`, components: createSetupRows() }).catch(() => null);
+    }
+    return true;
+  }
+  if ((interaction.customId === 'setup_fresh_sync_yes' || interaction.customId === 'setup_fresh_sync_no') && interaction.isButton()) {
+    if (interaction.customId === 'setup_fresh_sync_no') {
+      await interaction.update({
+        content: '✅ Setup complete with fresh data.\nFirelands Bot is ready to use. Delete this message to finish setup.',
+        components: createSetupFinishRow()
+      }).catch(() => null);
+      return true;
+    }
+    await interaction.update({ content: `${progressBar(15)} Syncing fixtures from Google Calendar...`, components: [] }).catch(() => null);
+    try {
+      await syncCalendarEvents();
+      await interaction.message?.edit({
+        content: `${progressBar(100)} ✅ Fixture sync completed.\nFirelands Bot setup is complete and ready to use. Delete this message to finish setup.`,
+        components: createSetupFinishRow()
+      }).catch(() => null);
+    } catch (error) {
+      await interaction.message?.edit({ content: `❌ Fixture sync failed: ${error.message}`, components: createSetupFinishRow() }).catch(() => null);
     }
     return true;
   }
