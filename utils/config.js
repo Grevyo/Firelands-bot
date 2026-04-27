@@ -14,54 +14,7 @@ function defaultConfig() {
       playerCommandRoleId: process.env.PLAYER_COMMAND_ROLE_ID || '',
       coachCommandRoleId: process.env.COACH_COMMAND_ROLE_ID || '',
       calendarId: process.env.CALENDAR_ID || '',
-      calendarCredentialsPath: process.env.CALENDAR_CREDENTIALS_PATH || process.env.GOOGLE_APPLICATION_CREDENTIALS || 'credentials.json'
-    },
-    roles: {
-      mens: {
-        player: process.env.MENS_PLAYER_ROLE_ID || 'ROLE_ID',
-        coach: process.env.MENS_COACH_ROLE_ID || 'ROLE_ID'
-      },
-      womens: {
-        player: process.env.WOMENS_PLAYER_ROLE_ID || 'ROLE_ID',
-        coach: process.env.WOMENS_COACH_ROLE_ID || 'ROLE_ID'
-      }
-    },
-    channels: {
-      events: process.env.EVENTS_CHANNEL_ID || '',
-      logs: process.env.LOGS_CHANNEL_ID || '',
-      ticket: process.env.TICKET_CHANNEL_ID || '',
-      admin: process.env.ADMIN_LOGS_CHANNEL_ID || '',
-      botCommands: process.env.BOT_COMMANDS_CHANNEL_ID || '',
-      teamChats: {
-        mens: process.env.MENS_TEAM_CHANNEL_ID || '',
-        womens: process.env.WOMENS_TEAM_CHANNEL_ID || ''
-      },
-      staffRooms: {
-        mens: process.env.MENS_STAFF_ROOM_ID || '',
-        womens: process.env.WOMENS_STAFF_ROOM_ID || ''
-      },
-      privateChatCategories: {
-        mens: process.env.MENS_PRIVATE_CHAT_CATEGORY_ID || '',
-        womens: process.env.WOMENS_PRIVATE_CHAT_CATEGORY_ID || ''
-      }
-    },
-    teams: {
-      mens: {
-        emoji: process.env.MENS_TEAM_EMOJI || '🔵',
-        label: process.env.MENS_TEAM_LABEL || 'Mens',
-        gender: process.env.MENS_TEAM_GENDER || 'male',
-        captainRoleId: process.env.MENS_CAPTAIN_ROLE_ID || '',
-        captainEmoji: process.env.MENS_CAPTAIN_EMOJI || '🅒',
-        eventNamePhrases: ['Mens practice', 'FU Men']
-      },
-      womens: {
-        emoji: process.env.WOMENS_TEAM_EMOJI || '🔴',
-        label: process.env.WOMENS_TEAM_LABEL || 'Womens',
-        gender: process.env.WOMENS_TEAM_GENDER || 'female',
-        captainRoleId: process.env.WOMENS_CAPTAIN_ROLE_ID || '',
-        captainEmoji: process.env.WOMENS_CAPTAIN_EMOJI || '🅒',
-        eventNamePhrases: ['FU Women', "Women's practice"]
-      }
+      calendarCredentialsPath: process.env.CALENDAR_CREDENTIALS_PATH || process.env.GOOGLE_APPLICATION_CREDENTIALS || ''
     },
     eventTypes: {
       autoDetect: true,
@@ -115,30 +68,33 @@ function buildRuntimeConfig(current = {}) {
   const base = defaultConfig();
   const currentRoles = current.roles || {};
   const currentTeams = current.teams || {};
+  const baseRoles = base.roles || {};
+  const baseTeams = base.teams || {};
+  const baseChannels = base.channels || {};
 
   const mergedRoles = Object.fromEntries(
-    [...new Set([...Object.keys(base.roles), ...Object.keys(currentRoles)])]
+    [...new Set([...Object.keys(baseRoles), ...Object.keys(currentRoles)])]
       .map((teamKey) => [
         teamKey,
         {
-          player: base.roles?.[teamKey]?.player || 'ROLE_ID',
-          coach: base.roles?.[teamKey]?.coach || 'ROLE_ID',
+          player: baseRoles?.[teamKey]?.player || 'ROLE_ID',
+          coach: baseRoles?.[teamKey]?.coach || 'ROLE_ID',
           ...(currentRoles[teamKey] || {})
         }
       ])
   );
 
   const mergedTeams = Object.fromEntries(
-    [...new Set([...Object.keys(base.teams), ...Object.keys(currentTeams)])]
+    [...new Set([...Object.keys(baseTeams), ...Object.keys(currentTeams)])]
       .map((teamKey) => [
         teamKey,
         {
-          emoji: base.teams?.[teamKey]?.emoji || '🔹',
-          label: base.teams?.[teamKey]?.label || teamKey,
-          gender: base.teams?.[teamKey]?.gender || '',
-          captainRoleId: base.teams?.[teamKey]?.captainRoleId || '',
-          captainEmoji: base.teams?.[teamKey]?.captainEmoji || '🅒',
-          eventNamePhrases: base.teams?.[teamKey]?.eventNamePhrases || [],
+          emoji: baseTeams?.[teamKey]?.emoji || '🔹',
+          label: baseTeams?.[teamKey]?.label || teamKey,
+          gender: baseTeams?.[teamKey]?.gender || '',
+          captainRoleId: baseTeams?.[teamKey]?.captainRoleId || '',
+          captainEmoji: baseTeams?.[teamKey]?.captainEmoji || '🅒',
+          eventNamePhrases: baseTeams?.[teamKey]?.eventNamePhrases || [],
           ...(currentTeams[teamKey] || {})
         }
       ])
@@ -151,18 +107,18 @@ function buildRuntimeConfig(current = {}) {
     bot: { ...base.bot, ...(current.bot || {}) },
     roles: mergedRoles,
     channels: {
-      ...base.channels,
+      ...baseChannels,
       ...(current.channels || {}),
       teamChats: {
-        ...base.channels.teamChats,
+        ...(baseChannels.teamChats || {}),
         ...(current.channels?.teamChats || {})
       },
       staffRooms: {
-        ...base.channels.staffRooms,
+        ...(baseChannels.staffRooms || {}),
         ...(current.channels?.staffRooms || {})
       },
       privateChatCategories: {
-        ...base.channels.privateChatCategories,
+        ...(baseChannels.privateChatCategories || {}),
         ...(current.channels?.privateChatCategories || {})
       }
     },
