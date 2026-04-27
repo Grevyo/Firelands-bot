@@ -56,6 +56,13 @@ function getSpreadsheetId(config = {}) {
   return match ? match[1] : String(input).trim();
 }
 
+function normalizeA1Range(range = '', fallback = '') {
+  const cleaned = String(range || '')
+    .replace(/[\r\n]+/g, '')
+    .trim();
+  return cleaned || String(fallback || '').trim();
+}
+
 function getSheetNameFromRange(range = '') {
   return String(range).split('!')[0].trim();
 }
@@ -187,8 +194,8 @@ async function loadConfigFromSheet(config = {}) {
   if (!spreadsheetId) return null;
 
   const sheets = await getSheetsClient(config);
-  const configRange = config.googleSync?.configRange || 'Config!A2:C';
-  const configIdsRange = config.googleSync?.configIdsRange || 'Config IDs!A2:C';
+  const configRange = normalizeA1Range(config.googleSync?.configRange, 'Config!A2:C');
+  const configIdsRange = normalizeA1Range(config.googleSync?.configIdsRange, 'Config IDs!A2:C');
   const [configRowsResponse, configIdsRowsResponse] = await Promise.all([
     sheets.spreadsheets.values.get({ spreadsheetId, range: configRange }).catch(() => ({ data: { values: [] } })),
     sheets.spreadsheets.values.get({ spreadsheetId, range: configIdsRange }).catch(() => ({ data: { values: [] } }))
@@ -228,7 +235,7 @@ async function appendAttendanceRow(config = {}, attendance = {}, range = 'Attend
 
   await sheets.spreadsheets.values.append({
     spreadsheetId,
-    range,
+    range: normalizeA1Range(range, 'Attendance!A2:F'),
     valueInputOption: 'RAW',
     insertDataOption: 'INSERT_ROWS',
     requestBody: { values: [row] }
@@ -241,7 +248,7 @@ async function appendCommandLogRow(config = {}, entry = {}) {
   const spreadsheetId = getSpreadsheetId(config);
   if (!spreadsheetId) return false;
 
-  const range = config.googleSync?.commandLogRange || "'Command Logs'!A2:I";
+  const range = normalizeA1Range(config.googleSync?.commandLogRange, "'Command Logs'!A2:I");
   const sheets = await getSheetsClient(config);
 
   await ensureSheetLayout(sheets, spreadsheetId, [
@@ -1028,15 +1035,21 @@ async function syncAllToSheet(config = {}, db = {}, options = {}) {
   if (!spreadsheetId) return { ok: false, reason: 'missing_spreadsheet_id' };
 
   const sheets = await getSheetsClient(config);
-  const fixturesRange = options.setupFreshWipe ? 'Fixtures!A2:G' : (config.googleSync?.fixturesRange || 'Fixtures!A2:G');
-  const commandLogRange = options.setupFreshWipe ? "'Command Logs'!A2:I" : (config.googleSync?.commandLogRange || "'Command Logs'!A2:I");
-  const attendanceRange = config.googleSync?.attendanceRange || 'Attendance!A2:F';
-  const configRange = config.googleSync?.configRange || 'Config!A2:C';
-  const configIdsRange = config.googleSync?.configIdsRange || 'Config IDs!A2:C';
-  const configBackupsRange = config.googleSync?.configBackupsRange || 'Config Backups!A2:F';
-  const playersRange = options.setupFreshWipe ? 'Players and Coaches!A2:Q' : (config.googleSync?.playersRange || 'Player and Coach Management!A2:Q');
-  const absencesRange = config.googleSync?.absencesRange || 'Absences!A2:Q';
-  const playerCoachNotesRange = config.googleSync?.playerCoachNotesRange || 'Player and Coach Notes!A2:I';
+  const fixturesRange = options.setupFreshWipe
+    ? 'Fixtures!A2:G'
+    : normalizeA1Range(config.googleSync?.fixturesRange, 'Fixtures!A2:G');
+  const commandLogRange = options.setupFreshWipe
+    ? "'Command Logs'!A2:I"
+    : normalizeA1Range(config.googleSync?.commandLogRange, "'Command Logs'!A2:I");
+  const attendanceRange = normalizeA1Range(config.googleSync?.attendanceRange, 'Attendance!A2:F');
+  const configRange = normalizeA1Range(config.googleSync?.configRange, 'Config!A2:C');
+  const configIdsRange = normalizeA1Range(config.googleSync?.configIdsRange, 'Config IDs!A2:C');
+  const configBackupsRange = normalizeA1Range(config.googleSync?.configBackupsRange, 'Config Backups!A2:F');
+  const playersRange = options.setupFreshWipe
+    ? 'Players and Coaches!A2:Q'
+    : normalizeA1Range(config.googleSync?.playersRange, 'Player and Coach Management!A2:Q');
+  const absencesRange = normalizeA1Range(config.googleSync?.absencesRange, 'Absences!A2:Q');
+  const playerCoachNotesRange = normalizeA1Range(config.googleSync?.playerCoachNotesRange, 'Player and Coach Notes!A2:I');
   const fixtureHeaders = ['eventId', 'title', 'date', 'location', 'team', 'discordMessageId', 'updatedAt'];
   const teamFixtureSections = options.setupFreshWipe ? [] : Object.keys(config.teams || {}).map((teamKey) => {
     const teamLabel = config.teams?.[teamKey]?.label || teamKey;
