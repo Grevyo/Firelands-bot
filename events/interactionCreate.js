@@ -350,10 +350,19 @@ async function refreshFixtureSettingsMessage(interaction, team) {
 function createTeamConfigFixtureSettingsRow(team) {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(`admin_team_config_action:${team}:event_name_phrases`).setLabel('📝 Event Name Phrases').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId(`admin_team_config_action:${team}:fixture_team`).setLabel('🔁 Set Fixture Team').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`admin_team_config_action:${team}:fixture_team`).setLabel('🔁 Manually Assign Fixture').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId(`admin_team_config_action:${team}:auto_assign_fixtures`).setLabel('⚡ Auto Assign Fixtures').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId(`admin_team_config_action:${team}:force_send_attendance`).setLabel('📣 Force Send Attendance').setStyle(ButtonStyle.Secondary)
   );
+}
+
+function buildFixtureSettingsPanel(config, guild, team, notice = '') {
+  const content = `${getTeamConfigSummary(config, guild, team)}\n\n**Fixture settings**${notice ? `\n${notice}` : ''}`;
+  return {
+    content,
+    embeds: [],
+    components: [createTeamConfigFixtureSettingsRow(team), createBackButtonRow(`admin_back_team_config:${team}`)]
+  };
 }
 
 function getUpcomingFixtures(db = {}) {
@@ -599,6 +608,24 @@ async function postAttendancePromptForEvent(interaction, event, config) {
   });
 
   setEventMessageId(event.id, message.id);
+}
+
+async function updateAttendancePromptToConfirmation(interaction, event, responderName, statusLabel) {
+  if (!event?.discordMessageId) return;
+  const teamChannelId = loadConfig().channels?.teamChats?.[event.team] || loadConfig().channels?.events;
+  if (!teamChannelId) return;
+  const channel = await interaction.client.channels.fetch(teamChannelId).catch(() => null);
+  if (!channel?.isTextBased?.()) return;
+  const message = await channel.messages.fetch(event.discordMessageId).catch(() => null);
+  if (!message) return;
+  await message.edit({
+    content: [
+      `✅ Thank you ${responderName}`,
+      `You have marked yourself as **${statusLabel}**`,
+      `${event.title} — ${new Date(event.date).toLocaleString()}`
+    ].join('\n'),
+    components: []
+  }).catch(() => null);
 }
 
 function buildMonthGroupedEventLines(events, db, guild, teamRolesMap, config) {
@@ -1960,7 +1987,7 @@ module.exports = {
       if (interaction.customId.startsWith('admin_team_management:')) {
         const action = interaction.customId.split(':')[1];
         if (action === 'new_team') {
-          const modal = new ModalBuilder().setCustomId('admin_new_team_modal').setTitle('Create New Team');
+          const modal = new ModalBuilder().setCustomId(`admin_new_team_modal:${interaction.message?.id || ''}`).setTitle('Create New Team');
           const keyInput = new TextInputBuilder().setCustomId('team_key').setLabel('Team key (letters/numbers, e.g. u18mens)').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(30);
           const labelInput = new TextInputBuilder().setCustomId('team_label').setLabel('Display name (e.g. U18 Mens)').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(80);
           const emojiInput = new TextInputBuilder().setCustomId('team_emoji').setLabel('Emoji (optional, default 🔹)').setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(20);
@@ -2060,11 +2087,7 @@ module.exports = {
           return;
         }
         if (selectedAction === 'fixtures_settings') {
-          await interaction.update({
-            content: `${getTeamConfigSummary(latestConfig, interaction.guild, team)}\n\n**Fixture settings**`,
-            embeds: [],
-            components: [createTeamConfigFixtureSettingsRow(team), createBackButtonRow(`admin_back_team_config:${team}`)]
-          });
+          await interaction.update(buildFixtureSettingsPanel(latestConfig, interaction.guild, team));
           return;
         }
         if (selectedAction === 'player_role' || selectedAction === 'coach_role') {
@@ -2151,7 +2174,7 @@ module.exports = {
         }
         if (selectedAction === 'event_name_phrases') {
           const modal = new ModalBuilder()
-            .setCustomId(`admin_set_event_phrases_modal:${team}`)
+            .setCustomId(`admin_set_event_phrases_modal:${team}:${interaction.message?.id || ''}`)
             .setTitle(`Set ${teamLabel} Event Phrases`);
           const phrasesInput = new TextInputBuilder()
             .setCustomId('phrases')
@@ -2232,37 +2255,13 @@ module.exports = {
             .slice(0, 25);
 
           if (!preview.length) {
-            await interaction.editReply({
-              content: 'No fixtures changed from exact phrase matching. Update event phrases if needed.',
-              embeds: [],
-              components: [createTeamConfigActionRow(loadConfig(), team), createBackButtonRow('admin_back_team_management')]
-            });
+            await interaction.editReply(buildFixtureSettingsPanel(loadConfig(), interaction.guild, team, 'ℹ️ No fixtures changed from exact phrase matching. Update event phrases if needed.'));
             return;
           }
 
-          pendingFixtureCorrections.set(interaction.user.id, preview.map((item) => item.eventId));
-
-          const correctionRow = new ActionRowBuilder().addComponents(
-            new StringSelectMenuBuilder()
-              .setCustomId(`admin_fixture_correction_dates:${team}`)
-              .setPlaceholder('Select any wrong fixture dates (optional)')
-              .setMinValues(0)
-              .setMaxValues(preview.length)
-              .addOptions(preview.map((item) => ({
-                label: `${new Date(item.date).toLocaleDateString()} — ${item.title}`.slice(0, 100),
-                value: item.eventId,
-                description: `Assigned to ${getTeamMeta(latestConfig, item.team).label}`.slice(0, 100)
-              })))
+          await interaction.editReply(
+            buildFixtureSettingsPanel(loadConfig(), interaction.guild, team, `✅ Auto-assigned ${assigned.length} fixture(s) by exact event-name phrase.`)
           );
-
-          await interaction.editReply({
-            content: [
-              `✅ Auto-assigned ${assigned.length} fixture(s) by exact event-name phrase.`,
-              'Review the list below. If any dates are wrong, select them next.'
-            ].join('\n'),
-            embeds: [],
-            components: [correctionRow, createBackButtonRow(`admin_back_team_config:${team}`)]
-          });
           return;
         }
         if (selectedAction === 'force_send_attendance') {
@@ -2286,7 +2285,7 @@ module.exports = {
       }
       if (interaction.customId === 'admin_create_team_btn') {
         const modal = new ModalBuilder()
-          .setCustomId('admin_new_team_modal')
+          .setCustomId(`admin_new_team_modal:${interaction.message?.id || ''}`)
           .setTitle('Create New Team');
 
         const keyInput = new TextInputBuilder()
@@ -2708,6 +2707,7 @@ module.exports = {
 
         const attendanceName = getPlayerDisplayName(interaction.user.id, interaction.user.tag);
         await interaction.reply({ content: '✅ You are marked as attending.', flags: MessageFlags.Ephemeral });
+        await updateAttendancePromptToConfirmation(interaction, event, attendanceName, 'Attending');
         await triggerGoogleSync(context);
         await notifyCoachAndAdminOnAttending(interaction, context, event, attendanceName, responderType);
         return;
@@ -3400,7 +3400,7 @@ module.exports = {
 
         if (selectedAction === 'event_name_phrases') {
           const modal = new ModalBuilder()
-            .setCustomId(`admin_set_event_phrases_modal:${team}`)
+            .setCustomId(`admin_set_event_phrases_modal:${team}:${interaction.message?.id || ''}`)
             .setTitle(`Set ${teamLabel} Event Phrases`);
 
           const phrasesInput = new TextInputBuilder()
@@ -3467,37 +3467,13 @@ module.exports = {
             .slice(0, 25);
 
           if (!preview.length) {
-            await interaction.editReply({
-              content: 'No fixtures changed from exact phrase matching. Update event phrases if needed.',
-              embeds: [],
-              components: [createTeamConfigActionRow(loadConfig(), team), createBackButtonRow('admin_back_team_management')]
-            });
+            await interaction.editReply(buildFixtureSettingsPanel(loadConfig(), interaction.guild, team, 'ℹ️ No fixtures changed from exact phrase matching. Update event phrases if needed.'));
             return;
           }
 
-          pendingFixtureCorrections.set(interaction.user.id, preview.map((item) => item.eventId));
-
-          const correctionRow = new ActionRowBuilder().addComponents(
-            new StringSelectMenuBuilder()
-              .setCustomId(`admin_fixture_correction_dates:${team}`)
-              .setPlaceholder('Select any wrong fixture dates (optional)')
-              .setMinValues(0)
-              .setMaxValues(preview.length)
-              .addOptions(preview.map((item) => ({
-                label: `${new Date(item.date).toLocaleDateString()} — ${item.title}`.slice(0, 100),
-                value: item.eventId,
-                description: `Assigned to ${getTeamMeta(config, item.team).label}`.slice(0, 100)
-              })))
+          await interaction.editReply(
+            buildFixtureSettingsPanel(loadConfig(), interaction.guild, team, `✅ Auto-assigned ${assigned.length} fixture(s) by exact event-name phrase.`)
           );
-
-          await interaction.editReply({
-            content: [
-              `✅ Auto-assigned ${assigned.length} fixture(s) by exact event-name phrase.`,
-              'Review the list below. If any dates are wrong, select them next.'
-            ].join('\n'),
-            embeds: [],
-            components: [correctionRow, createBackButtonRow(`admin_back_team_config:${team}`)]
-          });
           return;
         }
 
@@ -3779,9 +3755,12 @@ module.exports = {
         }
 
         await interaction.editReply({
-          content: `✅ Force-send complete for **${getTeamMeta(latestConfig, team).label}**. Sent ${sent}/${targets.length} attendance prompt(s).`,
-          embeds: [],
-          components: [createTeamConfigActionRow(latestConfig, team), createBackButtonRow('admin_back_team_management')]
+          ...buildFixtureSettingsPanel(
+            latestConfig,
+            interaction.guild,
+            team,
+            `✅ Force-send complete for **${getTeamMeta(latestConfig, team).label}**. Sent ${sent}/${targets.length} attendance prompt(s).`
+          )
         });
         return;
       }
@@ -4053,6 +4032,7 @@ module.exports = {
         ].join('\n'),
         flags: MessageFlags.Ephemeral
       });
+      await updateAttendancePromptToConfirmation(interaction, event, getPlayerDisplayName(interaction.user.id, interaction.user.tag), 'Not Attending');
       await triggerGoogleSync(context);
 
       const eventDateLabel = getCompactDateLabel(event.date);
@@ -4581,7 +4561,7 @@ module.exports = {
         await denyAdminAccess();
         return;
       }
-      const team = interaction.customId.split(':')[1];
+      const [, team, sourceMessageId = ''] = interaction.customId.split(':');
       const raw = interaction.fields.getTextInputValue('phrases');
       const phrases = [...new Set(raw.split(',').map((value) => value.trim()).filter(Boolean))];
 
@@ -4605,19 +4585,25 @@ module.exports = {
       }
 
       const latestConfig = loadConfig();
-      await refreshFixtureSettingsMessage(interaction, team);
+      if (sourceMessageId && interaction.channel?.isTextBased()) {
+        const source = await interaction.channel.messages.fetch(sourceMessageId).catch(() => null);
+        if (source) {
+          await source.edit(buildFixtureSettingsPanel(latestConfig, interaction.guild, team)).catch(() => null);
+        }
+      }
       await interaction.editReply({
         content: `${renderProgressMessage(100, `Event phrases updated for **${getTeamMeta(latestConfig, team).label}**.`)}\n${phrases.join(', ')}`
       });
       return;
     }
 
-    if (interaction.isModalSubmit() && interaction.customId === 'admin_new_team_modal') {
+    if (interaction.isModalSubmit() && interaction.customId.startsWith('admin_new_team_modal')) {
       if (!hasAdminAccess(interaction.member, config)) {
         await denyAdminAccess();
         return;
       }
 
+      const [, sourceMessageId = ''] = interaction.customId.split(':');
       const rawTeamKey = interaction.fields.getTextInputValue('team_key').trim().toLowerCase();
       const teamLabel = interaction.fields.getTextInputValue('team_label').trim();
       const teamEmoji = interaction.fields.getTextInputValue('team_emoji').trim() || '🔹';
@@ -4663,6 +4649,17 @@ module.exports = {
       await interaction.editReply({
         content: renderProgressMessage(100, `Team created: **${teamLabel}** (\`${teamKey}\`). It now appears under "Configure Existing Team".`)
       });
+      if (sourceMessageId && interaction.channel?.isTextBased()) {
+        const source = await interaction.channel.messages.fetch(sourceMessageId).catch(() => null);
+        if (source) {
+          const refreshed = loadConfig();
+          await source.edit({
+            content: getTeamManagementSummary(),
+            embeds: [],
+            components: [...createTeamButtonsRows(refreshed), createTeamManagementRow()]
+          }).catch(() => null);
+        }
+      }
     }
   }
 };

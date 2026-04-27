@@ -1,6 +1,13 @@
 const { google } = require('googleapis');
 const fs = require('fs');
 const path = require('path');
+const { determineEventType } = require('./eventType');
+
+const REQUIRED_SETUP_TABS = ['Fixtures', 'Players and Coaches', 'Attendance', 'Absences', 'Config', 'Command Logs', 'Backups'];
+
+function isTeamFixturesTab(title = '') {
+  return /\sfixtures$/i.test(String(title || '').trim()) && String(title || '').trim().toLowerCase() !== 'fixtures';
+}
 
 function toIso(date = new Date()) {
   return new Date(date).toISOString();
@@ -273,7 +280,19 @@ function normalizeAttendanceStatus(status = '') {
   return status || '';
 }
 
-function buildFixtureRows(db = {}) {
+function getMapsLink(location = '') {
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(location)}`;
+}
+
+function getLocationAliasLabel(config = {}, event = {}) {
+  const aliases = config.googleSync?.locationAliases || {};
+  const normalizeLocation = (value = '') => String(value).trim().replace(/\s+/g, ' ').toLowerCase();
+  const encodeKey = (eventType = 'any', location = '') => Buffer.from(`${eventType}|${normalizeLocation(location)}`).toString('base64url');
+  const eventType = determineEventType(event, config);
+  return aliases[encodeKey(eventType, event.location)] || aliases[encodeKey('any', event.location)] || '';
+}
+
+function buildFixtureRows(db = {}, config = {}) {
   return Object.entries(db.events || {})
     .map(([eventId, event]) => ({
       eventId,
@@ -289,15 +308,17 @@ function buildFixtureRows(db = {}) {
       event.eventId,
       compactText(event.title, 70),
       event.date,
-      compactText(event.location, 60),
+      event.location
+        ? `=HYPERLINK("${getMapsLink(event.location)}","${compactText(getLocationAliasLabel(config, event) || event.location, 60).replace(/"/g, '""')}")`
+        : '',
       event.team,
       event.discordMessageId,
       event.updatedAt
     ]);
 }
 
-function buildFixtureRowsForTeam(db = {}, team = '') {
-  return buildFixtureRows(db).filter((row) => row[4] === team);
+function buildFixtureRowsForTeam(db = {}, team = '', config = {}) {
+  return buildFixtureRows(db, config).filter((row) => row[4] === team);
 }
 
 function buildAttendanceRows(db = {}) {
@@ -554,7 +575,7 @@ async function writeRange(sheets, spreadsheetId, range, values, options = {}) {
   await sheets.spreadsheets.values.update({
     spreadsheetId,
     range: effectiveRange,
-    valueInputOption: 'RAW',
+    valueInputOption: options.valueInputOption || 'RAW',
     requestBody: { values }
   });
 }
@@ -868,7 +889,7 @@ async function buildSpreadsheetBackupSnapshot(config = {}, onProgress) {
   const metadata = await sheets.spreadsheets.get({ spreadsheetId });
   const targetSheets = (metadata.data.sheets || [])
     .map((entry) => entry.properties?.title)
-    .filter((title) => title && title !== backupsTabTitle);
+    .filter((title) => title && title !== backupsTabTitle && (REQUIRED_SETUP_TABS.includes(title) || isTeamFixturesTab(title)));
 
   const snapshot = { version: 1, createdAt: toIso(), tabs: [] };
   const startedAt = Date.now();
@@ -1007,17 +1028,17 @@ async function syncAllToSheet(config = {}, db = {}, options = {}) {
   if (!spreadsheetId) return { ok: false, reason: 'missing_spreadsheet_id' };
 
   const sheets = await getSheetsClient(config);
-  const fixturesRange = config.googleSync?.fixturesRange || 'Fixtures!A2:G';
-  const commandLogRange = config.googleSync?.commandLogRange || 'Command Log!A2:I';
+  const fixturesRange = options.setupFreshWipe ? 'Fixtures!A2:G' : (config.googleSync?.fixturesRange || 'Fixtures!A2:G');
+  const commandLogRange = options.setupFreshWipe ? 'Command Logs!A2:I' : (config.googleSync?.commandLogRange || 'Command Log!A2:I');
   const attendanceRange = config.googleSync?.attendanceRange || 'Attendance!A2:F';
   const configRange = config.googleSync?.configRange || 'Config!A2:C';
   const configIdsRange = config.googleSync?.configIdsRange || 'Config IDs!A2:C';
   const configBackupsRange = config.googleSync?.configBackupsRange || 'Config Backups!A2:F';
-  const playersRange = config.googleSync?.playersRange || 'Player and Coach Management!A2:Q';
+  const playersRange = options.setupFreshWipe ? 'Players and Coaches!A2:Q' : (config.googleSync?.playersRange || 'Player and Coach Management!A2:Q');
   const absencesRange = config.googleSync?.absencesRange || 'Absences!A2:Q';
   const playerCoachNotesRange = config.googleSync?.playerCoachNotesRange || 'Player and Coach Notes!A2:I';
   const fixtureHeaders = ['eventId', 'title', 'date', 'location', 'team', 'discordMessageId', 'updatedAt'];
-  const teamFixtureSections = Object.keys(config.teams || {}).map((teamKey) => {
+  const teamFixtureSections = options.setupFreshWipe ? [] : Object.keys(config.teams || {}).map((teamKey) => {
     const teamLabel = config.teams?.[teamKey]?.label || teamKey;
     const tabTitle = sanitizeSheetTitle(`${teamLabel} Fixtures`) || `${teamKey} Fixtures`;
     const mappedRange = config.googleSync?.teamFixturesRanges?.[teamKey] || '';
@@ -1035,41 +1056,70 @@ async function syncAllToSheet(config = {}, db = {}, options = {}) {
     };
   });
 
-  const sections = [
-    { range: 'Home!A2:E', headers: ['Tab', 'Purpose', 'Open', 'Previous', 'Next'], description: 'Navigation hub for every tab.' },
-    { range: fixturesRange, headers: fixtureHeaders, description: 'All fixtures synced from events.' },
-    { range: commandLogRange, headers: ['timestamp', 'source', 'command', 'subcommand', 'options', 'guildId', 'channelId', 'userId', 'username'], description: 'Slash command activity log.' },
-    ...teamFixtureSections,
-    { range: attendanceRange, headers: ['eventId', 'userId', 'username', 'team', 'status', 'updatedAt'], description: 'Attendance responses by event.' },
-    { range: configRange, headers: ['key', 'value', 'updatedAt'], description: 'Flattened runtime configuration.' },
-    { range: configIdsRange, headers: ['key', 'value', 'updatedAt'], description: 'Role / channel / team identifiers.' },
-    { range: configBackupsRange, headers: ['backupOrder', 'timestamp', 'changedPath', 'reason', 'snapshotPreview', 'snapshot'], description: 'Last 5 config states before changes.' },
-    { range: playersRange, headers: ['userIdPreview', 'customName', 'nickName', 'gender', 'shirtNumber', 'shirtNumbersByTeam', 'teams', 'coachTeams', 'coachPositionsByTeam', 'roles', 'joinedDiscordAt', 'notes', 'faceImageUrl', 'notesLog', 'updatedAt', 'userId', 'profileJson'], description: 'Player + coach management profiles, including team assignments, titles, and saved profile fields.' },
-    { range: absencesRange, headers: ['ticketPreview', 'channelPreview', 'eventPreview', 'eventTitle', 'eventDate', 'eventLocation', 'team', 'playerPreview', 'playerName', 'attendanceStatus', 'reason', 'coachDecision', 'coachPreview', 'coachName', 'closedAt', 'createdAt', 'closedReason', 'ticketId', 'channelId', 'eventId', 'playerId', 'coachId'], description: 'Absence tickets and outcomes.' },
-    { range: playerCoachNotesRange, headers: ['notePreview', 'openNote', 'name', 'profileType', 'noteSummary', 'hidden', 'authorTag', 'createdAt', 'updatedAt', 'noteId', 'userId', 'authorId', 'note'], description: 'Player and coach notes with quick-open links.' }
-  ];
+  const sections = options.setupFreshWipe
+    ? [
+      { range: fixturesRange, headers: fixtureHeaders, description: 'All events imported from Google Calendar plus address nicknames.' },
+      { range: playersRange, headers: ['userIdPreview', 'customName', 'nickName', 'gender', 'shirtNumber', 'shirtNumbersByTeam', 'teams', 'coachTeams', 'coachPositionsByTeam', 'roles', 'joinedDiscordAt', 'notes', 'faceImageUrl', 'notesLog', 'updatedAt', 'userId', 'profileJson'], description: 'All player and coach data, including notes.' },
+      { range: attendanceRange, headers: ['eventId', 'userId', 'username', 'team', 'status', 'updatedAt'], description: 'Attendance record of attending/not attending responses.' },
+      { range: absencesRange, headers: ['ticketPreview', 'channelPreview', 'eventPreview', 'eventTitle', 'eventDate', 'eventLocation', 'team', 'playerPreview', 'playerName', 'attendanceStatus', 'reason', 'coachDecision', 'coachPreview', 'coachName', 'closedAt', 'createdAt', 'closedReason', 'ticketId', 'channelId', 'eventId', 'playerId', 'coachId'], description: 'Logs for not-attending reasons and coach outcomes.' },
+      { range: configRange, headers: ['key', 'value', 'updatedAt'], description: 'Bot configuration values.' },
+      { range: commandLogRange, headers: ['timestamp', 'source', 'command', 'subcommand', 'options', 'guildId', 'channelId', 'userId', 'username'], description: 'Log of all commands used in the bot.' },
+      { range: 'Backups!A2:F', headers: ['slot', 'name', 'createdAt', 'createdBy', 'summary', 'snapshot'], description: 'Manual snapshot backups.' }
+    ]
+    : [
+      { range: 'Home!A2:E', headers: ['Tab', 'Purpose', 'Open', 'Previous', 'Next'], description: 'Navigation hub for every tab.' },
+      { range: fixturesRange, headers: fixtureHeaders, description: 'All fixtures synced from events.' },
+      { range: commandLogRange, headers: ['timestamp', 'source', 'command', 'subcommand', 'options', 'guildId', 'channelId', 'userId', 'username'], description: 'Slash command activity log.' },
+      ...teamFixtureSections,
+      { range: attendanceRange, headers: ['eventId', 'userId', 'username', 'team', 'status', 'updatedAt'], description: 'Attendance responses by event.' },
+      { range: configRange, headers: ['key', 'value', 'updatedAt'], description: 'Flattened runtime configuration.' },
+      { range: configIdsRange, headers: ['key', 'value', 'updatedAt'], description: 'Role / channel / team identifiers.' },
+      { range: configBackupsRange, headers: ['backupOrder', 'timestamp', 'changedPath', 'reason', 'snapshotPreview', 'snapshot'], description: 'Last 5 config states before changes.' },
+      { range: playersRange, headers: ['userIdPreview', 'customName', 'nickName', 'gender', 'shirtNumber', 'shirtNumbersByTeam', 'teams', 'coachTeams', 'coachPositionsByTeam', 'roles', 'joinedDiscordAt', 'notes', 'faceImageUrl', 'notesLog', 'updatedAt', 'userId', 'profileJson'], description: 'Player + coach management profiles, including team assignments, titles, and saved profile fields.' },
+      { range: absencesRange, headers: ['ticketPreview', 'channelPreview', 'eventPreview', 'eventTitle', 'eventDate', 'eventLocation', 'team', 'playerPreview', 'playerName', 'attendanceStatus', 'reason', 'coachDecision', 'coachPreview', 'coachName', 'closedAt', 'createdAt', 'closedReason', 'ticketId', 'channelId', 'eventId', 'playerId', 'coachId'], description: 'Absence tickets and outcomes.' },
+      { range: playerCoachNotesRange, headers: ['notePreview', 'openNote', 'name', 'profileType', 'noteSummary', 'hidden', 'authorTag', 'createdAt', 'updatedAt', 'noteId', 'userId', 'authorId', 'note'], description: 'Player and coach notes with quick-open links.' }
+    ];
 
   const sheetIdByTitle = await ensureSheetLayout(sheets, spreadsheetId, sections);
+  if (options.setupFreshWipe) {
+    const metadata = await sheets.spreadsheets.get({ spreadsheetId });
+    const allowed = new Set(REQUIRED_SETUP_TABS);
+    const requests = (metadata.data.sheets || [])
+      .filter((entry) => {
+        const title = entry.properties?.title;
+        return title && !allowed.has(title) && !isTeamFixturesTab(title) && Number.isInteger(entry.properties?.sheetId);
+      })
+      .map((entry) => ({ deleteSheet: { sheetId: entry.properties.sheetId } }));
+    if (requests.length) {
+      await sheets.spreadsheets.batchUpdate({ spreadsheetId, requestBody: { requests } });
+    }
+  }
   await writeTabNavigationRows(sheets, spreadsheetId, sections, sheetIdByTitle);
 
-  await writeRange(sheets, spreadsheetId, fixturesRange, buildFixtureRows(db), options);
+  await writeRange(sheets, spreadsheetId, fixturesRange, buildFixtureRows(db, config), { ...options, valueInputOption: 'USER_ENTERED' });
   for (const teamSection of teamFixtureSections) {
-    await writeRange(sheets, spreadsheetId, teamSection.range, buildFixtureRowsForTeam(db, teamSection.teamKey), options);
+    await writeRange(sheets, spreadsheetId, teamSection.range, buildFixtureRowsForTeam(db, teamSection.teamKey, config), { ...options, valueInputOption: 'USER_ENTERED' });
   }
   await writeRange(sheets, spreadsheetId, attendanceRange, buildAttendanceRows(db), options);
   await writeRange(sheets, spreadsheetId, configRange, flattenConfig(config), options);
-  await writeRange(sheets, spreadsheetId, configIdsRange, await buildMergedConfigIdRows(sheets, spreadsheetId, config, configIdsRange), options);
-  await writeRange(sheets, spreadsheetId, configBackupsRange, buildConfigBackupRows(config), options);
+  if (!options.setupFreshWipe) {
+    await writeRange(sheets, spreadsheetId, configIdsRange, await buildMergedConfigIdRows(sheets, spreadsheetId, config, configIdsRange), options);
+    await writeRange(sheets, spreadsheetId, configBackupsRange, buildConfigBackupRows(config), options);
+  }
   await writeRange(sheets, spreadsheetId, playersRange, buildPlayerRows(db, config), options);
   await writeRange(sheets, spreadsheetId, absencesRange, buildAbsenceRows(db), options);
-  await writeRange(
-    sheets,
-    spreadsheetId,
-    playerCoachNotesRange,
-    buildPlayerCoachNoteRows(db, sheetIdByTitle.get(getSheetNameFromRange(playerCoachNotesRange))),
-    options
-  );
-  await writeRange(sheets, spreadsheetId, 'Home!A2:E', buildHomeRows(sections.slice(1), sheetIdByTitle), options);
+  if (!options.setupFreshWipe) {
+    await writeRange(
+      sheets,
+      spreadsheetId,
+      playerCoachNotesRange,
+      buildPlayerCoachNoteRows(db, sheetIdByTitle.get(getSheetNameFromRange(playerCoachNotesRange))),
+      options
+    );
+  }
+  if (!options.setupFreshWipe) {
+    await writeRange(sheets, spreadsheetId, 'Home!A2:E', buildHomeRows(sections.slice(1), sheetIdByTitle), options);
+  }
 
   const hiddenColumnsRequests = [];
   const playersSheetId = sheetIdByTitle.get(getSheetNameFromRange(playersRange));

@@ -88,10 +88,11 @@ function buildSetupWelcome() {
 }
 
 function buildSetupSummary(config) {
-  const adminRole = config.bot?.adminRoleId ? `<@&${config.bot.adminRoleId}>` : 'not set';
-  const adminChannel = config.channels?.admin ? `<#${config.channels.admin}>` : 'not set';
-  const calendarId = config.bot?.calendarId || 'not set';
-  const spreadsheetId = getSpreadsheetId(config) || 'not set';
+  const draft = getSetupDraft();
+  const adminRole = draft.adminRoleId ? `<@&${draft.adminRoleId}>` : 'not set';
+  const adminChannel = draft.adminChannelId ? `<#${draft.adminChannelId}>` : 'not set';
+  const calendarId = draft.calendarId || 'not set';
+  const spreadsheetId = draft.spreadsheetId || 'not set';
   const serviceAccountEmail = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || 'firelands-bot-sync@firelands-bot-494321.iam.gserviceaccount.com';
   return [
     '⚙️ **Firelands Setup Wizard**',
@@ -148,15 +149,21 @@ function createSetupRows() {
 }
 
 function createSetupModeRows() {
+  return createSetupModeRowsWithBackup(true);
+}
+
+function createSetupModeRowsWithBackup(includeBackup = true) {
+  const options = [
+    { label: 'Fresh Config + Empty Sheets', value: 'fresh_config' }
+  ];
+  if (includeBackup) options.push({ label: 'Load Backup Slot', value: 'load_backup' });
+
   return [
     new ActionRowBuilder().addComponents(
       new StringSelectMenuBuilder()
         .setCustomId('setup_sheet_mode')
         .setPlaceholder('Choose initialization action')
-        .addOptions([
-          { label: 'Fresh Config + Empty Sheets', value: 'fresh_config' },
-          { label: 'Load Backup Slot', value: 'load_backup' }
-        ])
+        .addOptions(options)
     ),
     new ActionRowBuilder().addComponents(
       new ButtonBuilder()
@@ -233,6 +240,14 @@ async function updateSetupMessageFromModal(interaction, sourceMessageId) {
   return true;
 }
 
+async function hasBackupsTab(config) {
+  const spreadsheetId = getSpreadsheetId(config);
+  if (!spreadsheetId) return false;
+  const sheets = await getSheetsClient(config);
+  const metadata = await sheets.spreadsheets.get({ spreadsheetId });
+  return (metadata.data.sheets || []).some((sheet) => String(sheet.properties?.title || '').trim().toLowerCase() === 'backups');
+}
+
 function progressBar(percent = 0, width = 20) {
   const safePercent = Math.min(100, Math.max(0, Number.isFinite(percent) ? Math.round(percent) : 0));
   const filled = Math.round((safePercent / 100) * width);
@@ -256,6 +271,46 @@ function buildSetupRestoreProgressText(slot, progressState, done = false) {
 
 function getConfig() {
   return loadConfig();
+}
+
+function getSetupDraft(guildId = '') {
+  const db = loadDb();
+  if (!guildId) {
+    const drafts = db.meta?.setupWizardDraft || {};
+    return drafts._global || Object.values(drafts)[0] || {
+      adminRoleId: '',
+      adminChannelId: '',
+      calendarId: '',
+      spreadsheetId: ''
+    };
+  }
+  const key = guildId || '_global';
+  return db.meta?.setupWizardDraft?.[key] || {
+    adminRoleId: '',
+    adminChannelId: '',
+    calendarId: '',
+    spreadsheetId: ''
+  };
+}
+
+function saveSetupDraft(update = {}, guildId = '') {
+  const db = loadDb();
+  const key = guildId || '_global';
+  if (!db.meta) db.meta = {};
+  if (!db.meta.setupWizardDraft) db.meta.setupWizardDraft = {};
+  db.meta.setupWizardDraft[key] = {
+    ...getSetupDraft(guildId),
+    ...update
+  };
+  saveDb(db);
+  return db.meta.setupWizardDraft[key];
+}
+
+function applySetupDraftToConfig(draft = {}) {
+  if (draft.adminRoleId) updateConfig('bot.adminRoleId', draft.adminRoleId);
+  if (draft.adminChannelId) updateConfig('channels.admin', draft.adminChannelId);
+  if (draft.calendarId) updateConfig('bot.calendarId', draft.calendarId);
+  if (draft.spreadsheetId) updateConfig('googleSync.spreadsheetId', draft.spreadsheetId);
 }
 
 function toOptionSummary(interaction) {
@@ -438,6 +493,9 @@ async function handleSetupInteraction(interaction) {
   if (!String(interaction.customId || '').startsWith('setup_')) return false;
 
   if (interaction.customId === 'setup_get_started' && interaction.isButton()) {
+    if (!getSetupDraft(interaction.guildId).calendarId && !getSetupDraft(interaction.guildId).spreadsheetId) {
+      saveSetupDraft({}, interaction.guildId);
+    }
     await interaction.update({
       content: buildSetupSummary(getConfig()),
       components: createSetupRows()
@@ -463,6 +521,7 @@ async function handleSetupInteraction(interaction) {
     return true;
   }
   if (interaction.customId === 'setup_set_calendar_id' && interaction.isButton()) {
+    const draft = getSetupDraft(interaction.guildId);
     const modal = new ModalBuilder().setCustomId(`setup_set_calendar_id_modal:${interaction.message?.id || ''}`).setTitle('Set Google Calendar ID');
     modal.addComponents(
       new ActionRowBuilder().addComponents(
@@ -471,13 +530,14 @@ async function handleSetupInteraction(interaction) {
           .setLabel('Google Calendar ID')
           .setStyle(TextInputStyle.Short)
           .setRequired(true)
-          .setValue(getConfig().bot?.calendarId || '')
+          .setValue(draft.calendarId || '')
       )
     );
     await interaction.showModal(modal).catch(() => null);
     return true;
   }
   if (interaction.customId === 'setup_set_sheet_url' && interaction.isButton()) {
+    const draft = getSetupDraft(interaction.guildId);
     const modal = new ModalBuilder().setCustomId(`setup_set_sheet_url_modal:${interaction.message?.id || ''}`).setTitle('Set Google Sheet URL');
     modal.addComponents(
       new ActionRowBuilder().addComponents(
@@ -486,7 +546,7 @@ async function handleSetupInteraction(interaction) {
           .setLabel('Google Sheet URL or Spreadsheet ID')
           .setStyle(TextInputStyle.Short)
           .setRequired(true)
-          .setValue(getConfig().googleSync?.spreadsheetId || '')
+          .setValue(draft.spreadsheetId || '')
       )
     );
     await interaction.showModal(modal).catch(() => null);
@@ -499,8 +559,9 @@ async function handleSetupInteraction(interaction) {
     }).catch(() => null);
 
     const config = getConfig();
-    const calendarId = config.bot?.calendarId || '';
-    const spreadsheetId = getSpreadsheetId(config);
+    const draft = getSetupDraft(interaction.guildId);
+    const calendarId = draft.calendarId || '';
+    const spreadsheetId = draft.spreadsheetId || '';
     if (!calendarId || !spreadsheetId) {
       await interaction.message?.edit({
         content: `❌ Missing Google details.\nCalendar ID: \`${calendarId || 'not set'}\`\nSheet ID: \`${spreadsheetId || 'not set'}\`\n\nPlease recheck your Calendar ID and Sheet URL/ID, then click **Check Google connections** again.`,
@@ -524,9 +585,12 @@ async function handleSetupInteraction(interaction) {
         insertDataOption: 'INSERT_ROWS',
         requestBody: { values: [[new Date().toISOString(), 'setup', 'connection_check', '', '', interaction.guildId || '', interaction.channelId || '', interaction.user?.id || '', interaction.user?.tag || 'setup']] }
       });
+      const backupsTabAvailable = await hasBackupsTab(config).catch(() => false);
       await interaction.message?.edit({
-        content: '✅ Calendar read + Sheet write checks passed.\nNow choose initialization mode.',
-        components: createSetupModeRows()
+        content: backupsTabAvailable
+          ? '✅ Calendar read + Sheet write checks passed.\nNow choose initialization mode.'
+          : '✅ Calendar read + Sheet write checks passed.\n⚠️ Could not load backups because no **Backups** tab was found in the Google Sheet.\nYou can continue with **Fresh Config + Empty Sheets**.',
+        components: createSetupModeRowsWithBackup(backupsTabAvailable)
       }).catch(() => null);
     } catch (error) {
       await interaction.message?.edit({
@@ -538,7 +602,7 @@ async function handleSetupInteraction(interaction) {
   }
   if (interaction.customId.startsWith('setup_set_calendar_id_modal') && interaction.isModalSubmit()) {
     const calendarId = interaction.fields.getTextInputValue('calendar_id').trim();
-    updateConfig('bot.calendarId', calendarId);
+    saveSetupDraft({ calendarId }, interaction.guildId);
     const sourceMessageId = interaction.customId.split(':')[1] || '';
     const updated = await updateSetupMessageFromModal(interaction, sourceMessageId);
     await interaction.reply({
@@ -551,7 +615,7 @@ async function handleSetupInteraction(interaction) {
   }
   if (interaction.customId.startsWith('setup_set_sheet_url_modal') && interaction.isModalSubmit()) {
     const input = interaction.fields.getTextInputValue('sheet_input').trim();
-    updateConfig('googleSync.spreadsheetId', input);
+    saveSetupDraft({ spreadsheetId: getSpreadsheetId({ googleSync: { spreadsheetId: input } }) || input }, interaction.guildId);
     const sourceMessageId = interaction.customId.split(':')[1] || '';
     const updated = await updateSetupMessageFromModal(interaction, sourceMessageId);
     await interaction.reply({
@@ -566,18 +630,29 @@ async function handleSetupInteraction(interaction) {
   if (interaction.customId === 'setup_sheet_mode') {
     await interaction.deferUpdate().catch(() => null);
     updateConfig('googleSync.enabled', true);
+    const setupDraft = getSetupDraft(interaction.guildId);
+    applySetupDraftToConfig(setupDraft);
     const config = getConfig();
     try {
       if (interaction.values[0] === 'fresh_config') {
         resetConfigFresh();
         saveDb({ events: {}, futureAvailability: {}, absenceTickets: {}, players: {}, meta: { postEventCoachReminders: {}, setupWizard: {} } });
         const freshConfig = getConfig();
-        const result = await syncAllToSheet(freshConfig, loadDb(), { wipe: true });
+        applySetupDraftToConfig(setupDraft);
+        const result = await syncAllToSheet(freshConfig, loadDb(), { wipe: true, setupFreshWipe: true });
         await interaction.message?.edit(result.ok
           ? { content: `✅ Fresh config completed and sheet tabs rebuilt (\`${result.spreadsheetId}\`).\n\nWould you like to sync fixtures from Google Calendar now for the first time?`, components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('setup_fresh_sync_yes').setLabel('Yes, sync fixtures now').setStyle(ButtonStyle.Success), new ButtonBuilder().setCustomId('setup_fresh_sync_no').setLabel('No, finish setup').setStyle(ButtonStyle.Secondary))] }
           : { content: 'Could not sync because spreadsheet ID is not configured.', components: createSetupRows() }).catch(() => null);
         return true;
       } else if (interaction.values[0] === 'load_backup') {
+        const backupsTabAvailable = await hasBackupsTab(config).catch(() => false);
+        if (!backupsTabAvailable) {
+          await interaction.message?.edit({
+            content: '⚠️ Could not load a backup because no **Backups** tab was found in the connected Google Sheet.\nPlease use **Fresh Config + Empty Sheets**.',
+            components: createSetupModeRowsWithBackup(false)
+          }).catch(() => null);
+          return true;
+        }
         const backups = (await loadSheetBackups(config).catch(() => [])).sort((a, b) => a.slot - b.slot);
         await interaction.message?.edit({
           content: 'Pick a backup slot to restore. You can press **Back** to choose Fresh Config instead.',
@@ -663,11 +738,11 @@ async function handleSetupInteraction(interaction) {
   const config = getConfig();
   if (interaction.customId === 'setup_role_admin') {
     const roleId = interaction.values[0];
-    if (config.bot?.adminRoleId !== roleId) updateConfig('bot.adminRoleId', roleId);
+    saveSetupDraft({ adminRoleId: roleId }, interaction.guildId);
   }
   if (interaction.customId === 'setup_channel_admin') {
     const channelId = interaction.values[0];
-    if (config.channels?.admin !== channelId) updateConfig('channels.admin', channelId);
+    saveSetupDraft({ adminChannelId: channelId }, interaction.guildId);
   }
 
   await interaction.message?.edit({
