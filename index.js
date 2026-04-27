@@ -68,6 +68,7 @@ client.commands.set(coachCommand.data.name, coachCommand);
 client.commands.set(adminCommand.data.name, adminCommand);
 client.commands.set(confirmCommand.data.name, confirmCommand);
 const missingAttendanceConfigWarnings = new Set();
+const REQUIRED_SETUP_TABS = ['Fixtures', 'Players and Coaches', 'Attendance', 'Absences', 'Config', 'Command Logs', 'Backups'];
 
 function buildSetupWelcome() {
   return [
@@ -93,6 +94,7 @@ function buildSetupSummary(config) {
   const adminChannel = draft.adminChannelId ? `<#${draft.adminChannelId}>` : 'not set';
   const calendarId = draft.calendarId || 'not set';
   const spreadsheetId = draft.spreadsheetId || 'not set';
+  const statusNotice = String(draft.statusNotice || '').trim();
   const serviceAccountEmail = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || 'firelands-bot-sync@firelands-bot-494321.iam.gserviceaccount.com';
   return [
     '⚙️ **Firelands Setup Wizard**',
@@ -104,6 +106,7 @@ function buildSetupSummary(config) {
     `• Google Calendar ID: \`${calendarId}\``,
     `• Google Sheet ID: \`${spreadsheetId}\``,
     `• Share your Google Sheet as **Editor** with: \`${serviceAccountEmail}\``,
+    ...(statusNotice ? ['', statusNotice] : []),
     '',
     'Click **Check Google connections** to verify the bot can read the calendar and write to the sheet.',
     'After checks pass, choose initialization mode:',
@@ -240,12 +243,60 @@ async function updateSetupMessageFromModal(interaction, sourceMessageId) {
   return true;
 }
 
-async function hasBackupsTab(config) {
+function sanitizeGoogleRange(range = '', fallback = "'Command Logs'!A2:I") {
+  return String(range || '')
+    .replace(/\\[rn]/gi, '')
+    .replace(/[\r\n]+/g, '')
+    .trim() || String(fallback || '').trim();
+}
+
+function toA1SheetName(title = '') {
+  const raw = String(title || '').trim();
+  if (!raw) return 'Backups';
+  if (/^[A-Za-z0-9_]+$/.test(raw)) return raw;
+  return `'${raw.replace(/'/g, "''")}'`;
+}
+
+async function inspectSetupSheetState(config = {}) {
   const spreadsheetId = getSpreadsheetId(config);
-  if (!spreadsheetId) return false;
+  if (!spreadsheetId) {
+    return {
+      existingTabs: [],
+      missingRequiredTabs: [...REQUIRED_SETUP_TABS],
+      hasBackupsTab: false,
+      hasBackupSnapshots: false
+    };
+  }
+
   const sheets = await getSheetsClient(config);
   const metadata = await sheets.spreadsheets.get({ spreadsheetId });
-  return (metadata.data.sheets || []).some((sheet) => String(sheet.properties?.title || '').trim().toLowerCase() === 'backups');
+  const existingTabs = (metadata.data.sheets || [])
+    .map((sheet) => String(sheet.properties?.title || '').trim())
+    .filter(Boolean);
+  const titleLookup = new Map(existingTabs.map((title) => [title.toLowerCase(), title]));
+  const missingRequiredTabs = REQUIRED_SETUP_TABS.filter((required) => !titleLookup.has(required.toLowerCase()));
+  const backupsTitle = titleLookup.get('backups') || '';
+
+  let hasBackupSnapshots = false;
+  if (backupsTitle) {
+    const backupsRows = await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: `${toA1SheetName(backupsTitle)}!A2:F`
+    }).catch(() => ({ data: { values: [] } }));
+    const rows = backupsRows.data.values || [];
+    hasBackupSnapshots = rows.some((row = []) => {
+      const slot = Number.parseInt(String(row[0] || ''), 10);
+      const snapshot = String(row[5] || '').trim();
+      return Number.isInteger(slot) && slot >= 1 && slot <= 5 && Boolean(snapshot);
+    });
+  }
+
+  return {
+    existingTabs,
+    missingRequiredTabs,
+    hasBackupsTab: Boolean(backupsTitle),
+    hasBackupSnapshots
+  };
 }
 
 function progressBar(percent = 0, width = 20) {
@@ -300,7 +351,8 @@ function getSetupDraft(guildId = '') {
       adminRoleId: '',
       adminChannelId: '',
       calendarId: '',
-      spreadsheetId: ''
+      spreadsheetId: '',
+      statusNotice: ''
     };
   }
   const key = guildId || '_global';
@@ -308,7 +360,8 @@ function getSetupDraft(guildId = '') {
     adminRoleId: '',
     adminChannelId: '',
     calendarId: '',
-    spreadsheetId: ''
+    spreadsheetId: '',
+    statusNotice: ''
   };
 }
 
@@ -596,7 +649,7 @@ async function handleSetupInteraction(interaction) {
         teamMatchers: {}
       });
       const sheets = await getSheetsClient(config);
-      const commandLogRange = String(config.googleSync?.commandLogRange || "'Command Logs'!A2:I").replace(/[\r\n]+/g, '').trim() || "'Command Logs'!A2:I";
+      const commandLogRange = sanitizeGoogleRange(config.googleSync?.commandLogRange, "'Command Logs'!A2:I");
       await sheets.spreadsheets.values.append({
         spreadsheetId,
         range: commandLogRange,
@@ -604,12 +657,24 @@ async function handleSetupInteraction(interaction) {
         insertDataOption: 'INSERT_ROWS',
         requestBody: { values: [[new Date().toISOString(), 'setup', 'connection_check', '', '', interaction.guildId || '', interaction.channelId || '', interaction.user?.id || '', interaction.user?.tag || 'setup']] }
       });
-      const backupsTabAvailable = await hasBackupsTab(config).catch(() => false);
+      const sheetState = await inspectSetupSheetState(config).catch(() => null);
+      const backupsTabAvailable = Boolean(sheetState?.hasBackupsTab);
+      const hasBackupSnapshots = Boolean(sheetState?.hasBackupSnapshots);
+      const missingTabs = Array.isArray(sheetState?.missingRequiredTabs) ? sheetState.missingRequiredTabs : [];
       await interaction.message?.edit({
-        content: backupsTabAvailable
-          ? '✅ Calendar read + Sheet write checks passed.\nNow choose initialization mode.'
-          : '✅ Calendar read + Sheet write checks passed.\n⚠️ Could not load backups because no **Backups** tab was found in the Google Sheet.\nYou can continue with **Fresh Config + Empty Sheets**.',
-        components: createSetupModeRowsWithBackup(backupsTabAvailable)
+        content: hasBackupSnapshots
+          ? '✅ Calendar read + Sheet write checks passed.\n✅ Found backup snapshot(s) in **Backups**.\nChoose whether to restore a backup or start fresh.'
+          : [
+            '✅ Calendar read + Sheet write checks passed.',
+            missingTabs.length
+              ? `ℹ️ Missing setup tabs: ${missingTabs.join(', ')}.`
+              : 'ℹ️ Required setup tabs were found.',
+            backupsTabAvailable
+              ? 'ℹ️ **Backups** tab exists but no restoreable snapshot was found.'
+              : 'ℹ️ **Backups** tab was not found.',
+            'You can continue with **Fresh Config + Empty Sheets**, which creates/rebuilds all required setup tabs.'
+          ].join('\n'),
+        components: createSetupModeRowsWithBackup(hasBackupSnapshots)
       }).catch(() => null);
     } catch (error) {
       await interaction.message?.edit({
@@ -622,27 +687,47 @@ async function handleSetupInteraction(interaction) {
   if (interaction.customId.startsWith('setup_set_calendar_id_modal') && interaction.isModalSubmit()) {
     const calendarInput = interaction.fields.getTextInputValue('calendar_id').trim();
     const calendarId = parseCalendarId(calendarInput);
-    saveSetupDraft({ calendarId }, interaction.guildId);
+    saveSetupDraft({
+      calendarId,
+      statusNotice: '✅ Google Calendar ID saved. Setup wizard updated in-place.'
+    }, interaction.guildId);
     const sourceMessageId = interaction.customId.split(':')[1] || '';
     const updated = await updateSetupMessageFromModal(interaction, sourceMessageId);
+    if (updated) {
+      if (typeof interaction.deferUpdate === 'function') {
+        await interaction.deferUpdate().catch(() => null);
+      } else {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => null);
+        await interaction.deleteReply().catch(() => null);
+      }
+      return true;
+    }
     await interaction.reply({
-      content: updated
-        ? '✅ Google Calendar ID saved. Setup wizard updated in-place.'
-        : buildSetupSummary(getConfig()),
-      ...(updated ? { flags: MessageFlags.Ephemeral } : { components: createSetupRows() })
+      content: buildSetupSummary(getConfig()),
+      components: createSetupRows()
     }).catch(() => null);
     return true;
   }
   if (interaction.customId.startsWith('setup_set_sheet_url_modal') && interaction.isModalSubmit()) {
     const input = interaction.fields.getTextInputValue('sheet_input').trim();
-    saveSetupDraft({ spreadsheetId: getSpreadsheetId({ googleSync: { spreadsheetId: input } }) || input }, interaction.guildId);
+    saveSetupDraft({
+      spreadsheetId: getSpreadsheetId({ googleSync: { spreadsheetId: input } }) || input,
+      statusNotice: '✅ Google Sheet URL/ID saved. Setup wizard updated in-place.'
+    }, interaction.guildId);
     const sourceMessageId = interaction.customId.split(':')[1] || '';
     const updated = await updateSetupMessageFromModal(interaction, sourceMessageId);
+    if (updated) {
+      if (typeof interaction.deferUpdate === 'function') {
+        await interaction.deferUpdate().catch(() => null);
+      } else {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => null);
+        await interaction.deleteReply().catch(() => null);
+      }
+      return true;
+    }
     await interaction.reply({
-      content: updated
-        ? '✅ Google Sheet URL/ID saved. Setup wizard updated in-place.'
-        : buildSetupSummary(getConfig()),
-      ...(updated ? { flags: MessageFlags.Ephemeral } : { components: createSetupRows() })
+      content: buildSetupSummary(getConfig()),
+      components: createSetupRows()
     }).catch(() => null);
     return true;
   }
@@ -667,10 +752,11 @@ async function handleSetupInteraction(interaction) {
           : { content: 'Could not sync because spreadsheet ID is not configured.', components: createSetupRows() }).catch(() => null);
         return true;
       } else if (interaction.values[0] === 'load_backup') {
-        const backupsTabAvailable = await hasBackupsTab(config).catch(() => false);
-        if (!backupsTabAvailable) {
+        const sheetState = await inspectSetupSheetState(config).catch(() => null);
+        const hasBackupSnapshots = Boolean(sheetState?.hasBackupSnapshots);
+        if (!hasBackupSnapshots) {
           await interaction.message?.edit({
-            content: '⚠️ Could not load a backup because no **Backups** tab was found in the connected Google Sheet.\nPlease use **Fresh Config + Empty Sheets**.',
+            content: '⚠️ Could not load a backup because no restoreable snapshot was found in the **Backups** tab.\nPlease use **Fresh Config + Empty Sheets**.',
             components: createSetupModeRowsWithBackup(false)
           }).catch(() => null);
           return true;

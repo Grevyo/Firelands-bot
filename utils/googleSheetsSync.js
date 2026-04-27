@@ -58,6 +58,7 @@ function getSpreadsheetId(config = {}) {
 
 function normalizeA1Range(range = '', fallback = '') {
   const cleaned = String(range || '')
+    .replace(/\\[rn]/gi, '')
     .replace(/[\r\n]+/g, '')
     .trim();
   return cleaned || String(fallback || '').trim();
