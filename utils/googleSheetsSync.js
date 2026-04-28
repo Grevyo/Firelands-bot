@@ -307,7 +307,22 @@ function getLocationAliasLabel(config = {}, event = {}) {
   return aliases[encodeKey(eventType, event.location)] || aliases[encodeKey('any', event.location)] || '';
 }
 
+
+function buildFixtureAddressColumns(config = {}) {
+  const aliases = config.googleSync?.locationAliases || {};
+  return Object.values(aliases)
+    .map((value) => String(value || '').trim())
+    .filter(Boolean)
+    .filter((value, index, arr) => arr.indexOf(value) === index)
+    .slice(0, 20);
+}
+
+function buildFixtureHeaders(config = {}) {
+  return ['eventId', 'title', 'date', 'location', ...buildFixtureAddressColumns(config), 'team', 'discordMessageId', 'updatedAt'];
+}
+
 function buildFixtureRows(db = {}, config = {}) {
+  const addressColumns = buildFixtureAddressColumns(config);
   return Object.entries(db.events || {})
     .map(([eventId, event]) => ({
       eventId,
@@ -319,21 +334,31 @@ function buildFixtureRows(db = {}, config = {}) {
       updatedAt: event.updatedAt || toIso()
     }))
     .sort((a, b) => new Date(a.date || 0).getTime() - new Date(b.date || 0).getTime())
-    .map((event) => [
-      event.eventId,
-      compactText(event.title, 70),
-      event.date,
-      event.location
-        ? `=HYPERLINK("${getMapsLink(event.location)}","${compactText(getLocationAliasLabel(config, event) || event.location, 60).replace(/"/g, '""')}")`
-        : '',
-      event.team,
-      event.discordMessageId,
-      event.updatedAt
-    ]);
+    .map((event) => {
+      const addressFlags = addressColumns.map((nickname) => (getLocationAliasLabel(config, event) === nickname ? '✅' : ''));
+      return [
+        event.eventId,
+        compactText(event.title, 70),
+        event.date,
+        event.location
+          ? `=HYPERLINK("${getMapsLink(event.location)}","${compactText(getLocationAliasLabel(config, event) || event.location, 60).replace(/"/g, '""')}")`
+          : '',
+        ...addressFlags,
+        event.team,
+        event.discordMessageId,
+        event.updatedAt
+      ];
+    });
 }
 
 function buildFixtureRowsForTeam(db = {}, team = '', config = {}) {
-  return buildFixtureRows(db, config).filter((row) => row[4] === team);
+  const filteredDb = {
+    ...db,
+    events: Object.fromEntries(
+      Object.entries(db.events || {}).filter(([, event]) => (event?.team || '') === team)
+    )
+  };
+  return buildFixtureRows(filteredDb, config);
 }
 
 function buildAttendanceRows(db = {}) {
@@ -1057,7 +1082,7 @@ async function syncAllToSheet(config = {}, db = {}, options = {}) {
     : normalizeA1Range(config.googleSync?.playersRange, 'Player and Coach Management!A2:Q');
   const absencesRange = normalizeA1Range(config.googleSync?.absencesRange, 'Absences!A2:Q');
   const playerCoachNotesRange = normalizeA1Range(config.googleSync?.playerCoachNotesRange, 'Player and Coach Notes!A2:I');
-  const fixtureHeaders = ['eventId', 'title', 'date', 'location', 'team', 'discordMessageId', 'updatedAt'];
+  const fixtureHeaders = buildFixtureHeaders(config);
   const teamFixtureSections = options.setupFreshWipe ? [] : Object.keys(config.teams || {}).map((teamKey) => {
     const teamLabel = config.teams?.[teamKey]?.label || teamKey;
     const tabTitle = sanitizeSheetTitle(`${teamLabel} Fixtures`) || `${teamKey} Fixtures`;
@@ -1076,28 +1101,32 @@ async function syncAllToSheet(config = {}, db = {}, options = {}) {
     };
   });
 
-  const sections = options.setupFreshWipe
+  const sections = options.fixturesOnly
     ? [
-      { range: fixturesRange, headers: fixtureHeaders, description: 'All events imported from Google Calendar plus address nicknames.' },
-      { range: playersRange, headers: ['userIdPreview', 'customName', 'nickName', 'gender', 'shirtNumber', 'shirtNumbersByTeam', 'teams', 'coachTeams', 'coachPositionsByTeam', 'roles', 'joinedDiscordAt', 'notes', 'faceImageUrl', 'notesLog', 'updatedAt', 'userId', 'profileJson'], description: 'All player and coach data, including notes.' },
-      { range: attendanceRange, headers: ['eventId', 'userId', 'username', 'team', 'status', 'updatedAt'], description: 'Attendance record of attending/not attending responses.' },
-      { range: absencesRange, headers: ['ticketPreview', 'channelPreview', 'eventPreview', 'eventTitle', 'eventDate', 'eventLocation', 'team', 'playerPreview', 'playerName', 'attendanceStatus', 'reason', 'coachDecision', 'coachPreview', 'coachName', 'closedAt', 'createdAt', 'closedReason', 'ticketId', 'channelId', 'eventId', 'playerId', 'coachId'], description: 'Logs for not-attending reasons and coach outcomes.' },
-      { range: configRange, headers: ['key', 'value', 'updatedAt'], description: 'Bot configuration values.' },
-      { range: commandLogRange, headers: ['timestamp', 'source', 'command', 'subcommand', 'options', 'guildId', 'channelId', 'userId', 'username'], description: 'Log of all commands used in the bot.' },
-      { range: 'Backups!A2:F', headers: ['slot', 'name', 'createdAt', 'createdBy', 'summary', 'snapshot'], description: 'Manual snapshot backups.' }
+      { range: fixturesRange, headers: fixtureHeaders, description: 'All fixtures synced from events.' }
     ]
-    : [
-      { range: 'Home!A2:E', headers: ['Tab', 'Purpose', 'Open', 'Previous', 'Next'], description: 'Navigation hub for every tab.' },
-      { range: fixturesRange, headers: fixtureHeaders, description: 'All fixtures synced from events.' },
-      { range: commandLogRange, headers: ['timestamp', 'source', 'command', 'subcommand', 'options', 'guildId', 'channelId', 'userId', 'username'], description: 'Slash command activity log.' },
-      ...teamFixtureSections,
-      { range: attendanceRange, headers: ['eventId', 'userId', 'username', 'team', 'status', 'updatedAt'], description: 'Attendance responses by event.' },
-      { range: configRange, headers: ['key', 'value', 'updatedAt'], description: 'Flattened runtime configuration.' },
-      { range: configBackupsRange, headers: ['backupOrder', 'timestamp', 'changedPath', 'reason', 'snapshotPreview', 'snapshot'], description: 'Last 5 config states before changes.' },
-      { range: playersRange, headers: ['userIdPreview', 'customName', 'nickName', 'gender', 'shirtNumber', 'shirtNumbersByTeam', 'teams', 'coachTeams', 'coachPositionsByTeam', 'roles', 'joinedDiscordAt', 'notes', 'faceImageUrl', 'notesLog', 'updatedAt', 'userId', 'profileJson'], description: 'Player + coach management profiles, including team assignments, titles, and saved profile fields.' },
-      { range: absencesRange, headers: ['ticketPreview', 'channelPreview', 'eventPreview', 'eventTitle', 'eventDate', 'eventLocation', 'team', 'playerPreview', 'playerName', 'attendanceStatus', 'reason', 'coachDecision', 'coachPreview', 'coachName', 'closedAt', 'createdAt', 'closedReason', 'ticketId', 'channelId', 'eventId', 'playerId', 'coachId'], description: 'Absence tickets and outcomes.' },
-      { range: playerCoachNotesRange, headers: ['notePreview', 'openNote', 'name', 'profileType', 'noteSummary', 'hidden', 'authorTag', 'createdAt', 'updatedAt', 'noteId', 'userId', 'authorId', 'note'], description: 'Player and coach notes with quick-open links.' }
-    ];
+    : options.setupFreshWipe
+      ? [
+        { range: fixturesRange, headers: fixtureHeaders, description: 'All events imported from Google Calendar plus address nicknames.' },
+        { range: playersRange, headers: ['userIdPreview', 'customName', 'nickName', 'gender', 'shirtNumber', 'shirtNumbersByTeam', 'teams', 'coachTeams', 'coachPositionsByTeam', 'roles', 'joinedDiscordAt', 'notes', 'faceImageUrl', 'notesLog', 'updatedAt', 'userId', 'profileJson'], description: 'All player and coach data, including notes.' },
+        { range: attendanceRange, headers: ['eventId', 'userId', 'username', 'team', 'status', 'updatedAt'], description: 'Attendance record of attending/not attending responses.' },
+        { range: absencesRange, headers: ['ticketPreview', 'channelPreview', 'eventPreview', 'eventTitle', 'eventDate', 'eventLocation', 'team', 'playerPreview', 'playerName', 'attendanceStatus', 'reason', 'coachDecision', 'coachPreview', 'coachName', 'closedAt', 'createdAt', 'closedReason', 'ticketId', 'channelId', 'eventId', 'playerId', 'coachId'], description: 'Logs for not-attending reasons and coach outcomes.' },
+        { range: configRange, headers: ['key', 'value', 'updatedAt'], description: 'Bot configuration values.' },
+        { range: commandLogRange, headers: ['timestamp', 'source', 'command', 'subcommand', 'options', 'guildId', 'channelId', 'userId', 'username'], description: 'Log of all commands used in the bot.' },
+        { range: 'Backups!A2:F', headers: ['slot', 'name', 'createdAt', 'createdBy', 'summary', 'snapshot'], description: 'Manual snapshot backups.' }
+      ]
+      : [
+        { range: 'Home!A2:E', headers: ['Tab', 'Purpose', 'Open', 'Previous', 'Next'], description: 'Navigation hub for every tab.' },
+        { range: fixturesRange, headers: fixtureHeaders, description: 'All fixtures synced from events.' },
+        { range: commandLogRange, headers: ['timestamp', 'source', 'command', 'subcommand', 'options', 'guildId', 'channelId', 'userId', 'username'], description: 'Slash command activity log.' },
+        ...teamFixtureSections,
+        { range: attendanceRange, headers: ['eventId', 'userId', 'username', 'team', 'status', 'updatedAt'], description: 'Attendance responses by event.' },
+        { range: configRange, headers: ['key', 'value', 'updatedAt'], description: 'Flattened runtime configuration.' },
+        { range: configBackupsRange, headers: ['backupOrder', 'timestamp', 'changedPath', 'reason', 'snapshotPreview', 'snapshot'], description: 'Last 5 config states before changes.' },
+        { range: playersRange, headers: ['userIdPreview', 'customName', 'nickName', 'gender', 'shirtNumber', 'shirtNumbersByTeam', 'teams', 'coachTeams', 'coachPositionsByTeam', 'roles', 'joinedDiscordAt', 'notes', 'faceImageUrl', 'notesLog', 'updatedAt', 'userId', 'profileJson'], description: 'Player + coach management profiles, including team assignments, titles, and saved profile fields.' },
+        { range: absencesRange, headers: ['ticketPreview', 'channelPreview', 'eventPreview', 'eventTitle', 'eventDate', 'eventLocation', 'team', 'playerPreview', 'playerName', 'attendanceStatus', 'reason', 'coachDecision', 'coachPreview', 'coachName', 'closedAt', 'createdAt', 'closedReason', 'ticketId', 'channelId', 'eventId', 'playerId', 'coachId'], description: 'Absence tickets and outcomes.' },
+        { range: playerCoachNotesRange, headers: ['notePreview', 'openNote', 'name', 'profileType', 'noteSummary', 'hidden', 'authorTag', 'createdAt', 'updatedAt', 'noteId', 'userId', 'authorId', 'note'], description: 'Player and coach notes with quick-open links.' }
+      ];
 
   const sheetIdByTitle = await ensureSheetLayout(sheets, spreadsheetId, sections);
   if (options.setupFreshWipe) {
@@ -1116,6 +1145,9 @@ async function syncAllToSheet(config = {}, db = {}, options = {}) {
   await writeTabNavigationRows(sheets, spreadsheetId, sections, sheetIdByTitle);
 
   await writeRange(sheets, spreadsheetId, fixturesRange, buildFixtureRows(db, config), { ...options, valueInputOption: 'USER_ENTERED' });
+  if (options.fixturesOnly) {
+    return { ok: true, spreadsheetId };
+  }
   for (const teamSection of teamFixtureSections) {
     await writeRange(sheets, spreadsheetId, teamSection.range, buildFixtureRowsForTeam(db, teamSection.teamKey, config), { ...options, valueInputOption: 'USER_ENTERED' });
   }
