@@ -17,6 +17,7 @@ const {
 const {
   loadDb,
   saveDb,
+  upsertEvent,
   setResponse,
   clearResponse,
   setAbsenceTicket,
@@ -92,18 +93,19 @@ function getGoogleToolsSummary(config = {}) {
   const calendarId = config.bot?.calendarId || 'not set';
   const lastSyncedAt = config.googleSync?.lastSyncedAt;
   const lastSyncedLabel = lastSyncedAt ? new Date(lastSyncedAt).toLocaleString() : 'never';
+  const autoSyncEnabled = Boolean(config.googleSync?.autoFullSync);
   return [
     '📗 **Google Tools**',
     `Current calendar source: **${calendarId}**`,
     `Last calendar/sheets sync: **${lastSyncedLabel}**`,
+    `Auto sync fixtures: **${autoSyncEnabled ? 'ON' : 'OFF'}**`,
     '',
     'What each button does:',
     '• Sync Google Sheets: force sync fixtures/attendance/config into the sheet.',
     '• Open Google Sheet: opens the configured spreadsheet URL.',
     '• Open Google Calendar: opens the configured calendar in your browser.',
     '• Show Google Calendar Events: shows what is currently in the Fixtures tab.',
-    '• Event Addresses: list event addresses captured from fixtures.',
-    '• Set Address Nickname: map venue addresses to readable nicknames.'
+    '• Address + event type tools are in Fixture Settings.'
   ].join('\n');
 }
 
@@ -133,13 +135,26 @@ function getClubManagementSummary() {
     'Configure club-wide settings and integrations.',
     '',
     'Buttons in this menu:',
-    '• 📗 Google — open Google tools (calendar/sheets/addresses).',
+    '• 📗 Google — open Google calendar + sheet sync tools.',
+    '• 🧰 Fixture Settings — event type rules and address nicknames.',
     '• 🛎️ Set Admin Chat — choose the admin log + failure channel.',
     '• 💬 Set Bot Commands Chat — choose where /player and /coach should run.',
     '• 💾 Backups — save/restore sheet snapshots.',
     '• 🎓 Coach Roles — manage coaching title names and defaults.',
-    '• 🧭 Event Type Rules — manage event type detection rules.',
     '• ⬅️ Back — return to Admin home.'
+  ].join('\n');
+}
+
+function getFixtureSettingsSummary() {
+  return [
+    '🧰 **Fixture Settings**',
+    'Manage fixture classification and location nicknames.',
+    '',
+    'Buttons in this menu:',
+    '• 🧭 Event Type Rules — control auto-detection and exact-name mappings.',
+    '• 📍 Event Addresses — list captured event addresses.',
+    '• 🏷️ Set Address Nickname — map addresses to short labels.',
+    '• ⬅️ Back — return to Club Management.'
   ].join('\n');
 }
 
@@ -245,6 +260,7 @@ function createTeamManagementRow() {
 function createClubManagementRow() {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('admin_club_action:google').setLabel('📗 Google').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('admin_club_action:fixture_settings').setLabel('🧰 Fixture Settings').setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId('admin_club_action:set_admin_chat').setLabel('🛎️ Set Admin Chat').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('admin_club_action:set_bot_commands_chat').setLabel('💬 Set Bot Commands Chat').setStyle(ButtonStyle.Secondary)
   );
@@ -254,24 +270,43 @@ function createClubManagementRow2() {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('admin_club_action:backups').setLabel('💾 Backups').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('admin_club_action:coach_roles').setLabel('🎓 Coach Roles').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('admin_club_action:event_type_rules').setLabel('🧭 Event Type Rules').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('admin_back_to_panel').setLabel('⬅️ Back').setStyle(ButtonStyle.Secondary)
   );
 }
 
-function createGoogleToolsRow() {
+function createGoogleToolsRow(config = loadConfig()) {
+  const sheetUrl = adminCommand.getSpreadsheetViewUrl(config);
+  const calendarUrl = getGoogleCalendarViewUrl(config);
+  const sheetButton = sheetUrl
+    ? new ButtonBuilder().setLabel('📄 Open Google Sheet').setStyle(ButtonStyle.Link).setURL(sheetUrl)
+    : new ButtonBuilder().setCustomId('admin_google_action:open_google_sheet').setLabel('📄 Open Google Sheet').setStyle(ButtonStyle.Secondary);
+  const calendarButton = calendarUrl
+    ? new ButtonBuilder().setLabel('🗓️ Open Google Calendar').setStyle(ButtonStyle.Link).setURL(calendarUrl)
+    : new ButtonBuilder().setCustomId('admin_google_action:open_google_calendar').setLabel('🗓️ Open Google Calendar').setStyle(ButtonStyle.Secondary);
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('admin_google_action:sync_google').setLabel('🔄 Sync Calendar → Fixtures').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('admin_google_action:open_google_sheet').setLabel('📄 Open Google Sheet').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('admin_google_action:open_google_calendar').setLabel('🗓️ Open Google Calendar').setStyle(ButtonStyle.Secondary),
+    sheetButton,
+    calendarButton,
     new ButtonBuilder().setCustomId('admin_google_action:view_google_events').setLabel('📆 Show Google Calendar Events').setStyle(ButtonStyle.Secondary)
   );
 }
 
-function createGoogleToolsRow2() {
+function createGoogleToolsRow2(config = loadConfig()) {
+  const autoSyncEnabled = Boolean(config.googleSync?.autoFullSync);
   return new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('admin_google_action:view_event_locations').setLabel('📍 Event Addresses').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('admin_google_action:set_location_nickname').setLabel('🏷️ Set Address Nickname').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId('admin_google_action:toggle_auto_sync')
+      .setLabel(autoSyncEnabled ? '🛑 Auto Sync: ON' : '✅ Auto Sync: OFF')
+      .setStyle(autoSyncEnabled ? ButtonStyle.Danger : ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('admin_back_club_management').setLabel('⬅️ Back').setStyle(ButtonStyle.Secondary)
+  );
+}
+
+function createFixtureSettingsRow() {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('admin_fixture_action:event_type_rules').setLabel('🧭 Event Type Rules').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('admin_fixture_action:view_event_locations').setLabel('📍 Event Addresses').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('admin_fixture_action:set_location_nickname').setLabel('🏷️ Set Address Nickname').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('admin_back_club_management').setLabel('⬅️ Back').setStyle(ButtonStyle.Secondary)
   );
 }
@@ -292,7 +327,7 @@ function createEventTypeRulesRow2() {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('admin_event_type_rule:set_other_exact').setLabel('🧩 Other Exact Names').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('admin_event_type_rule:manual_set_event_type').setLabel('🎯 Manual Event Type').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('admin_back_club_management').setLabel('⬅️ Back').setStyle(ButtonStyle.Secondary)
+    new ButtonBuilder().setCustomId('admin_back_fixture_settings').setLabel('⬅️ Back').setStyle(ButtonStyle.Secondary)
   );
 }
 
@@ -1577,14 +1612,38 @@ async function handlePanelGoogleSync(interaction) {
   const db = loadDb();
 
   try {
-    const result = await syncAllToSheet({ ...latestConfig, googleSync: { ...latestConfig.googleSync, enabled: true } }, db, { fixturesOnly: true });
+    const teamMatchers = Object.fromEntries(
+      Object.entries(latestConfig.teams || {}).map(([teamKey, meta]) => [
+        teamKey,
+        Array.isArray(meta?.eventNamePhrases) ? meta.eventNamePhrases : []
+      ])
+    );
+    const calendarEvents = await fetchCalendarEvents({
+      calendarId: latestConfig.bot?.calendarId || '',
+      daysAhead: null,
+      credentialsPath: latestConfig.bot?.calendarCredentialsPath || '',
+      teamMatchers
+    });
+    for (const event of calendarEvents) {
+      const existing = db.events?.[event.id] || {};
+      upsertEvent(event.id, {
+        title: event.title,
+        date: event.date,
+        location: event.location || existing.location || '',
+        team: existing.team || event.team,
+        discordMessageId: existing.discordMessageId || '',
+        responses: existing.responses || {}
+      });
+    }
+    const latestDb = loadDb();
+    const result = await syncAllToSheet({ ...latestConfig, googleSync: { ...latestConfig.googleSync, enabled: true } }, latestDb, { fixturesOnly: true });
     if (!result.ok) {
       await interaction.editReply('Could not sync because spreadsheet ID is not configured.');
       return;
     }
     updateConfig('googleSync.lastSyncedAt', new Date().toISOString());
 
-    await interaction.editReply(`✅ Synced calendar events to the Fixtures tab (\`${result.spreadsheetId}\`).`);
+    await interaction.editReply(`✅ Synced ${calendarEvents.length} calendar events to the Fixtures tab (\`${result.spreadsheetId}\`).`);
   } catch (error) {
     await interaction.editReply(`❌ Google sync failed: ${error.message}`);
   }
@@ -1629,10 +1688,19 @@ module.exports = {
         return;
       }
       if (interaction.customId === 'admin_back_google_tools') {
+        const latestConfig = loadConfig();
         await interaction.update({
-          content: getGoogleToolsSummary(loadConfig()),
+          content: getGoogleToolsSummary(latestConfig),
           embeds: [],
-          components: [createGoogleToolsRow(), createGoogleToolsRow2()]
+          components: [createGoogleToolsRow(latestConfig), createGoogleToolsRow2(latestConfig)]
+        });
+        return;
+      }
+      if (interaction.customId === 'admin_back_fixture_settings') {
+        await interaction.update({
+          content: getFixtureSettingsSummary(),
+          embeds: [],
+          components: [createFixtureSettingsRow()]
         });
         return;
       }
@@ -1717,6 +1785,10 @@ module.exports = {
           await interaction.update({ content: getGoogleToolsSummary(loadConfig()), embeds: [], components: [createGoogleToolsRow(), createGoogleToolsRow2()] });
           return;
         }
+        if (action === 'fixture_settings') {
+          await interaction.update({ content: getFixtureSettingsSummary(), embeds: [], components: [createFixtureSettingsRow()] });
+          return;
+        }
         if (action === 'set_admin_chat') {
           const row = new ActionRowBuilder().addComponents(
             new ChannelSelectMenuBuilder().setCustomId('admin_set_channel:channels.admin:global').setPlaceholder('Choose Admin Chat channel').setChannelTypes(ChannelType.GuildText).setMinValues(1).setMaxValues(1)
@@ -1729,28 +1801,6 @@ module.exports = {
             new ChannelSelectMenuBuilder().setCustomId('admin_set_channel:channels.botCommands:global').setPlaceholder('Choose Bot Commands channel').setChannelTypes(ChannelType.GuildText).setMinValues(1).setMaxValues(1)
           );
           await interaction.update({ content: 'Select the channel where /player and /coach commands must be used.', embeds: [], components: [row, createBackButtonRow('admin_back_club_management')] });
-          return;
-        }
-        if (action === 'event_type_rules') {
-          const rules = getEventTypeConfig(loadConfig());
-          await interaction.update({
-            content: [
-              '🧭 **Event Type Rules**',
-              'Control how fixtures are classified as practice/match/other.',
-              '',
-              'Buttons in this menu:',
-              '• Auto Detect toggle — switch title-based auto classification ON/OFF.',
-              '• Practice/Match/Other Exact Names — save exact title matches per type.',
-              '• Manual Event Type — change a specific event type manually.',
-              '',
-              `• Auto Detect: **${rules.autoDetect ? 'ON' : 'OFF'}**`,
-              `• Practice Exact Names: ${rules.practiceExactNames.join(', ') || 'none'}`,
-              `• Match Exact Names: ${rules.matchExactNames.join(', ') || 'none'}`,
-              `• Other Exact Names: ${rules.otherExactNames.join(', ') || 'none'}`
-            ].join('\n'),
-            embeds: [],
-            components: [createEventTypeRulesRow(loadConfig()), createEventTypeRulesRow2()]
-          });
           return;
         }
         if (action === 'backups') {
@@ -1778,13 +1828,103 @@ module.exports = {
           return;
         }
       }
+      if (interaction.customId.startsWith('admin_fixture_action:')) {
+        const action = interaction.customId.split(':')[1];
+        if (action === 'event_type_rules') {
+          const rules = getEventTypeConfig(loadConfig());
+          await interaction.update({
+            content: [
+              '🧭 **Event Type Rules**',
+              'Control how fixtures are classified as practice/match/other.',
+              '',
+              'Buttons in this menu:',
+              '• Auto Detect toggle — switch title-based auto classification ON/OFF.',
+              '• Practice/Match/Other Exact Names — save exact title matches per type.',
+              '• Manual Event Type — change a specific event type manually.',
+              '',
+              `• Auto Detect: **${rules.autoDetect ? 'ON' : 'OFF'}**`,
+              `• Practice Exact Names: ${rules.practiceExactNames.join(', ') || 'none'}`,
+              `• Match Exact Names: ${rules.matchExactNames.join(', ') || 'none'}`,
+              `• Other Exact Names: ${rules.otherExactNames.join(', ') || 'none'}`
+            ].join('\n'),
+            embeds: [],
+            components: [createEventTypeRulesRow(loadConfig()), createEventTypeRulesRow2()]
+          });
+          return;
+        }
+        if (action === 'view_event_locations') {
+          const db = loadDb();
+          const grouped = buildLocationGroupsFromEvents(Object.values(db.events || {}), config);
+          if (!grouped.length) {
+            await interaction.update({
+              content: 'No event addresses found yet. Sync calendar fixtures first.',
+              embeds: [],
+              components: [createFixtureSettingsRow()]
+            });
+            return;
+          }
+          const lines = grouped.map((entry) => {
+            const label = `(${eventTypeLabel(entry.eventType)})`;
+            return `• ${label} [${entry.location}](${getMapsLink(entry.location)}) — ${entry.count} event(s)`;
+          });
+          const chunks = chunkLines(lines, 15);
+          const embeds = chunks.map((chunk, idx) => new EmbedBuilder()
+            .setTitle(`Event Addresses (${grouped.length})`)
+            .setDescription(chunk.join('\n\n'))
+            .setColor(0x3498db)
+            .setFooter({ text: `Page ${idx + 1} of ${chunks.length}` }));
+          await interaction.update({
+            content: '📍 Grouped event addresses:',
+            embeds: [embeds[0]],
+            components: [createFixtureSettingsRow()]
+          });
+          for (let i = 1; i < embeds.length; i += 1) {
+            await interaction.followUp({ embeds: [embeds[i]], flags: MessageFlags.Ephemeral });
+          }
+          return;
+        }
+        if (action === 'set_location_nickname') {
+          const db = loadDb();
+          const grouped = buildLocationGroupsFromEvents(Object.values(db.events || {}), config).slice(0, 25);
+          if (!grouped.length) {
+            await interaction.update({
+              content: 'No event addresses found yet. Sync calendar fixtures first.',
+              embeds: [],
+              components: [createFixtureSettingsRow()]
+            });
+            return;
+          }
+
+          const token = Math.random().toString(36).slice(2, 12);
+          pendingLocationAliasSelections.set(token, grouped);
+          const row = new ActionRowBuilder().addComponents(
+            new StringSelectMenuBuilder()
+              .setCustomId(`admin_location_alias_pick:${token}`)
+              .setPlaceholder('Pick address + type to nickname')
+              .addOptions(grouped.map((entry, idx) => {
+                const nickname = getLocationNickname(config, entry.eventType, entry.location);
+                return {
+                  label: `(${eventTypeLabel(entry.eventType)}) ${entry.location}`.slice(0, 100),
+                  value: String(idx),
+                  description: `${entry.count} event(s)${nickname ? ` • Nickname: ${nickname}` : ''}`.slice(0, 100)
+                };
+              }))
+          );
+          await interaction.update({
+            content: 'Select an address group to set a nickname.',
+            embeds: [],
+            components: [row, createBackButtonRow('admin_back_fixture_settings')]
+          });
+          return;
+        }
+      }
       if (interaction.customId.startsWith('admin_google_action:')) {
         const action = interaction.customId.split(':')[1];
         if (action === 'open_google_calendar') {
-          const latestConfig = context.getConfig();
+          const latestConfig = loadConfig();
           const calendarUrl = getGoogleCalendarViewUrl(latestConfig);
           await logAdminUiAction(interaction, 'admin', 'open-google-calendar');
-          await interaction.update({ content: calendarUrl ? `Open Google Calendar: ${calendarUrl}` : 'Google Calendar ID is not configured yet. Set it first in setup or with /admin-config.', embeds: [], components: [createGoogleToolsRow(), createGoogleToolsRow2()] });
+          await interaction.update({ content: calendarUrl ? `Open Google Calendar: ${calendarUrl}` : 'Google Calendar ID is not configured yet. Set it first in setup or with /admin-config.', embeds: [], components: [createGoogleToolsRow(latestConfig), createGoogleToolsRow2(latestConfig)] });
           return;
         }
         if (action === 'sync_google') {
@@ -1793,10 +1933,23 @@ module.exports = {
           return;
         }
         if (action === 'open_google_sheet') {
-          const latestConfig = context.getConfig();
+          const latestConfig = loadConfig();
           const sheetUrl = adminCommand.getSpreadsheetViewUrl(latestConfig);
           await logAdminUiAction(interaction, 'admin', 'open-google-sheet');
-          await interaction.update({ content: sheetUrl ? `Open Google Sheet: ${sheetUrl}` : 'Google spreadsheet is not configured yet. Set it first in Club Management > Google.', embeds: [], components: [createGoogleToolsRow(), createGoogleToolsRow2()] });
+          await interaction.update({ content: sheetUrl ? `Open Google Sheet: ${sheetUrl}` : 'Google spreadsheet is not configured yet. Set it first in Club Management > Google.', embeds: [], components: [createGoogleToolsRow(latestConfig), createGoogleToolsRow2(latestConfig)] });
+          return;
+        }
+        if (action === 'toggle_auto_sync') {
+          const latestConfig = loadConfig();
+          const next = !latestConfig.googleSync?.autoFullSync;
+          updateConfig('googleSync.autoFullSync', next);
+          await logAdminUiAction(interaction, 'admin-config', 'toggle-auto-sync', { enabled: next });
+          const refreshed = loadConfig();
+          await interaction.update({
+            content: `✅ Auto sync is now **${next ? 'ON' : 'OFF'}**.\nWhen ON, calendar changes sync to sheets every 5 minutes and posted fixture messages are updated.`,
+            embeds: [],
+            components: [createGoogleToolsRow(refreshed), createGoogleToolsRow2(refreshed)]
+          });
           return;
         }
         if (action === 'view_google_events') {
@@ -1820,76 +1973,6 @@ module.exports = {
           for (let i = 1; i < embeds.length; i += 1) {
             await interaction.followUp({ embeds: [embeds[i]], flags: MessageFlags.Ephemeral });
           }
-          return;
-        }
-        if (action === 'view_event_locations') {
-          const db = loadDb();
-          const grouped = buildLocationGroupsFromEvents(Object.values(db.events || {}), config);
-          if (!grouped.length) {
-            await interaction.update({
-              content: 'No event addresses found yet. Sync calendar fixtures first.',
-              embeds: [],
-              components: [createGoogleToolsRow(), createGoogleToolsRow2()]
-            });
-            return;
-          }
-
-          const lines = grouped.map((entry) => {
-            const label = `(${eventTypeLabel(entry.eventType)})`;
-            return `• ${label} [${entry.location}](${getMapsLink(entry.location)}) — ${entry.count} event(s)`;
-          });
-
-          const chunks = chunkLines(lines, 15);
-          const embeds = chunks.map((chunk, idx) => new EmbedBuilder()
-            .setTitle(`Event Addresses (${grouped.length})`)
-            .setDescription(chunk.join('\n\n'))
-            .setColor(0x3498db)
-            .setFooter({ text: `Page ${idx + 1} of ${chunks.length}` }));
-
-          await interaction.update({
-            content: '📍 Grouped event addresses:',
-            embeds: [embeds[0]],
-            components: [createGoogleToolsRow(), createGoogleToolsRow2()]
-          });
-
-          for (let i = 1; i < embeds.length; i += 1) {
-            await interaction.followUp({ embeds: [embeds[i]], flags: MessageFlags.Ephemeral });
-          }
-          return;
-        }
-        if (action === 'set_location_nickname') {
-          const db = loadDb();
-          const grouped = buildLocationGroupsFromEvents(Object.values(db.events || {}), config).slice(0, 25);
-          if (!grouped.length) {
-            await interaction.update({
-              content: 'No event addresses found yet. Sync calendar fixtures first.',
-              embeds: [],
-              components: [createGoogleToolsRow(), createGoogleToolsRow2()]
-            });
-            return;
-          }
-
-          const token = Math.random().toString(36).slice(2, 12);
-          pendingLocationAliasSelections.set(token, grouped);
-          const row = new ActionRowBuilder().addComponents(
-            new StringSelectMenuBuilder()
-              .setCustomId(`admin_location_alias_pick:${token}`)
-              .setPlaceholder('Pick address + type to nickname')
-              .addOptions(grouped.map((entry, idx) => {
-                const nickname = getLocationNickname(config, entry.eventType, entry.location);
-                return {
-                  label: `(${eventTypeLabel(entry.eventType)}) ${entry.location}`.slice(0, 100),
-                  value: String(idx),
-                  description: `${entry.count} event(s)${nickname ? ` • Nickname: ${nickname}` : ''}`.slice(0, 100)
-                };
-              }))
-          );
-
-          await interaction.update({
-            content: 'Select an address group to set a nickname.',
-            embeds: [],
-            components: [row, createBackButtonRow('admin_back_google_tools')]
-          });
           return;
         }
         if (action === 'sync_backup') {
