@@ -560,6 +560,33 @@ function formatEventDate(dateValue) {
   });
 }
 
+function getEventAnnouncementContent(event = {}, teamRoleId = '') {
+  return [
+    teamRoleId ? `<@&${teamRoleId}>` : null,
+    `📅 ${event.title}`,
+    `🕒 ${formatEventDate(event.date)}`,
+    event.location ? `📍 ${event.location}` : null,
+    'Please mark your availability now.'
+  ].filter(Boolean).join('\n');
+}
+
+function summarizeEventChanges(previous = {}, incoming = {}) {
+  const changes = [];
+  if ((previous.title || '') !== (incoming.title || '')) {
+    changes.push(`title: "${previous.title || 'n/a'}" → "${incoming.title || 'n/a'}"`);
+  }
+  if ((previous.date || '') !== (incoming.date || '')) {
+    changes.push(`time: "${formatEventDate(previous.date)}" → "${formatEventDate(incoming.date)}"`);
+  }
+  if ((previous.location || '') !== (incoming.location || '')) {
+    changes.push(`location: "${previous.location || 'n/a'}" → "${incoming.location || 'n/a'}"`);
+  }
+  if ((previous.team || '') !== (incoming.team || '')) {
+    changes.push(`team: "${previous.team || 'n/a'}" → "${incoming.team || 'n/a'}"`);
+  }
+  return changes;
+}
+
 function findGuildSetupChannel(guild) {
   if (guild.systemChannel?.isTextBased()) return guild.systemChannel;
 
@@ -1032,18 +1059,48 @@ async function postEventMessage(event) {
   const row = new ActionRowBuilder().addComponents(attendingButton, notAttendingButton);
 
   const message = await channel.send({
-    content: [
-      `<@&${teamRoleId}>`,
-      `📅 ${event.title}`,
-      `🕒 ${formatEventDate(event.date)}`,
-      event.location ? `📍 ${event.location}` : null,
-      'Please mark your availability now.'
-    ].filter(Boolean).join('\n'),
+    content: getEventAnnouncementContent(event, teamRoleId),
     components: [row]
   });
 
   setEventMessageId(event.id, message.id);
   await sendLog(`📌 Posted event: **${event.title}** (${event.team})`);
+}
+
+async function updatePostedEventMessage(eventId, event) {
+  if (!event?.discordMessageId || !event?.team) return false;
+  const config = getConfig();
+  const teamChatId = config.channels?.teamChats?.[event.team];
+  const teamRoleId = config.roles?.[event.team]?.player || '';
+  if (!teamChatId) return false;
+  const channel = await client.channels.fetch(teamChatId).catch(() => null);
+  if (!channel?.isTextBased()) return false;
+  const message = await channel.messages.fetch(event.discordMessageId).catch(() => null);
+  if (!message) return false;
+  await message.edit({
+    content: getEventAnnouncementContent(event, teamRoleId),
+    components: message.components || []
+  }).catch(() => null);
+  return true;
+}
+
+async function notifyAttendingUsersAboutChange(event = {}, changeLines = []) {
+  if (!event?.id || !changeLines.length) return;
+  const latestDb = loadDb();
+  const responses = latestDb.events?.[event.id]?.responses || {};
+  const attendingIds = Object.entries(responses)
+    .filter(([, response]) => response?.status === 'yes')
+    .map(([userId]) => userId);
+  for (const userId of attendingIds) {
+    const user = await client.users.fetch(userId).catch(() => null);
+    if (!user) continue;
+    await user.send([
+      `🔔 **Fixture update:** ${event.title}`,
+      `• ${changeLines.join('\n• ')}`,
+      `Updated time: ${formatEventDate(event.date)}`,
+      event.location ? `Updated location: ${event.location}` : ''
+    ].filter(Boolean).join('\n')).catch(() => null);
+  }
 }
 
 async function syncCalendarEvents() {
@@ -1067,6 +1124,13 @@ async function syncCalendarEvents() {
 
     for (const event of calendarEvents) {
       const existingEvent = db.events[event.id];
+      const normalizedIncoming = {
+        title: event.title,
+        date: event.date,
+        location: event.location || '',
+        team: existingEvent?.team || event.team
+      };
+      const changeLines = existingEvent ? summarizeEventChanges(existingEvent, normalizedIncoming) : [];
 
       if (!existingEvent) {
         upsertEvent(event.id, {
@@ -1088,6 +1152,16 @@ async function syncCalendarEvents() {
 
       const latestDb = loadDb();
       const syncedEvent = latestDb.events[event.id];
+      const syncedWithId = { ...syncedEvent, id: event.id };
+
+      if (changeLines.length) {
+        await updatePostedEventMessage(event.id, syncedWithId);
+        await notifyAttendingUsersAboutChange(syncedWithId, changeLines);
+        await sendLog([
+          `📝 Calendar event updated: **${syncedEvent.title}** (${event.id})`,
+          ...changeLines.map((line) => `• ${line}`)
+        ].join('\n'));
+      }
 
       if (!syncedEvent?.team || syncedEvent.discordMessageId) continue;
       if (!isWithinDays(syncedEvent.date, 14)) continue;
@@ -1100,7 +1174,7 @@ async function syncCalendarEvents() {
 
       clearAttendanceWarning(syncedEvent.team, `Team setup incomplete for ${syncedEvent.team}. Missing: ${getTeamSetupProgress(config, syncedEvent.team).missing.join(', ')}`);
 
-      await postEventMessage({ ...syncedEvent, id: event.id });
+      await postEventMessage(syncedWithId);
       console.log(`Posted new event: ${syncedEvent.title} (${event.id})`);
     }
 
