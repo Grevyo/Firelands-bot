@@ -100,11 +100,19 @@ function getGoogleToolsSummary(config = {}) {
     'What each button does:',
     '• Sync Google Sheets: force sync fixtures/attendance/config into the sheet.',
     '• Open Google Sheet: opens the configured spreadsheet URL.',
-    '• Set Google Calendar ID: choose which calendar fixtures are pulled from.',
-    '• View Google Calendar Events: import and preview fixtures from Google Calendar.',
+    '• Open Google Calendar: opens the configured calendar in your browser.',
+    '• Show Google Calendar Events: shows what is currently in the Fixtures tab.',
     '• Event Addresses: list event addresses captured from fixtures.',
     '• Set Address Nickname: map venue addresses to readable nicknames.'
   ].join('\n');
+}
+
+
+function getGoogleCalendarViewUrl(config = {}) {
+  const input = String(config.bot?.calendarId || '').trim();
+  if (!input) return '';
+  if (input.includes('calendar.google.com/calendar')) return input;
+  return `https://calendar.google.com/calendar/u/0/r?cid=${encodeURIComponent(input)}`;
 }
 
 function getTeamManagementSummary() {
@@ -255,8 +263,8 @@ function createGoogleToolsRow() {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('admin_google_action:sync_google').setLabel('🔄 Sync Calendar → Fixtures').setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId('admin_google_action:open_google_sheet').setLabel('📄 Open Google Sheet').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('admin_google_action:set_calendar_id').setLabel('🗓️ Set Google Calendar ID').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('admin_google_action:view_google_events').setLabel('📆 View Google Calendar Events').setStyle(ButtonStyle.Secondary)
+    new ButtonBuilder().setCustomId('admin_google_action:open_google_calendar').setLabel('🗓️ Open Google Calendar').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('admin_google_action:view_google_events').setLabel('📆 Show Google Calendar Events').setStyle(ButtonStyle.Secondary)
   );
 }
 
@@ -1569,14 +1577,14 @@ async function handlePanelGoogleSync(interaction) {
   const db = loadDb();
 
   try {
-    const result = await syncAllToSheet({ ...latestConfig, googleSync: { ...latestConfig.googleSync, enabled: true } }, db);
+    const result = await syncAllToSheet({ ...latestConfig, googleSync: { ...latestConfig.googleSync, enabled: true } }, db, { fixturesOnly: true });
     if (!result.ok) {
       await interaction.editReply('Could not sync because spreadsheet ID is not configured.');
       return;
     }
     updateConfig('googleSync.lastSyncedAt', new Date().toISOString());
 
-    await interaction.editReply(`✅ Synced fixtures, attendance, command log, and config to Google Sheets (\`${result.spreadsheetId}\`).`);
+    await interaction.editReply(`✅ Synced calendar events to the Fixtures tab (\`${result.spreadsheetId}\`).`);
   } catch (error) {
     await interaction.editReply(`❌ Google sync failed: ${error.message}`);
   }
@@ -1772,11 +1780,11 @@ module.exports = {
       }
       if (interaction.customId.startsWith('admin_google_action:')) {
         const action = interaction.customId.split(':')[1];
-        if (action === 'set_calendar_id') {
-          const modal = new ModalBuilder().setCustomId('admin_set_calendar_modal').setTitle('Set Google Calendar ID');
-          const calendarIdInput = new TextInputBuilder().setCustomId('calendar_id').setLabel('Google Calendar ID (email-like)').setStyle(TextInputStyle.Short).setRequired(true).setValue(config.bot.calendarId || '').setMaxLength(150);
-          modal.addComponents(new ActionRowBuilder().addComponents(calendarIdInput));
-          await interaction.showModal(modal);
+        if (action === 'open_google_calendar') {
+          const latestConfig = context.getConfig();
+          const calendarUrl = getGoogleCalendarViewUrl(latestConfig);
+          await logAdminUiAction(interaction, 'admin', 'open-google-calendar');
+          await interaction.update({ content: calendarUrl ? `Open Google Calendar: ${calendarUrl}` : 'Google Calendar ID is not configured yet. Set it first in setup or with /admin-config.', embeds: [], components: [createGoogleToolsRow(), createGoogleToolsRow2()] });
           return;
         }
         if (action === 'sync_google') {
@@ -1792,7 +1800,26 @@ module.exports = {
           return;
         }
         if (action === 'view_google_events') {
-          await interaction.update({ content: 'Choose a team to view fixtures, or choose **All Teams**.', embeds: [], components: withOptionalRow([createEventScopePickerRow(loadConfig()), createBackButtonRow('admin_back_google_tools')]) });
+          const latestConfig = loadConfig();
+          const db = loadDb();
+          const upcomingFixtures = getUpcomingFixtures(db);
+          const lines = buildMonthGroupedEventLines(upcomingFixtures, db, interaction.guild, teamRolesMap, latestConfig);
+          const chunks = chunkLines(lines.length ? lines : ['No fixtures found in the Fixtures tab yet. Run **Sync Calendar → Fixtures** first.'], 15);
+          const embeds = chunks.map((chunk, index) => new EmbedBuilder()
+            .setTitle(`Google Calendar — Fixtures (${lines.length ? upcomingFixtures.length : 0})`)
+            .setDescription(chunk.join('\n'))
+            .setColor(0x2ecc71)
+            .setFooter({ text: `Page ${index + 1} of ${chunks.length}` }));
+
+          await interaction.update({
+            content: lines.length ? '📆 Showing events currently synced into the Fixtures tab.' : 'No fixtures found in the Fixtures tab yet.',
+            embeds: [embeds[0]],
+            components: [createGoogleToolsRow(), createGoogleToolsRow2()]
+          });
+
+          for (let i = 1; i < embeds.length; i += 1) {
+            await interaction.followUp({ embeds: [embeds[i]], flags: MessageFlags.Ephemeral });
+          }
           return;
         }
         if (action === 'view_event_locations') {
